@@ -8,6 +8,17 @@ use serde::{Deserialize, Serialize};
 // part 2: api data transfer objects (请求与响应载荷)
 // ==========================================
 
+// TODO: don't forget verify auth pubkey with registry on backend
+// user sign message with a auth prvkey which on registry.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct Challenge {
+    #[schema(example = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMDcYqby4TnhKV6xGyuZUtxOmTtXjKYp8r+uCxbGph65")]
+    auth: String,
+    #[schema(example = "-----BEGIN SSH SIGNATURE-----\n...")]
+    signature: String
+}
+
+
 // payload received from restful post request to create a peer
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePeerReq {
@@ -21,7 +32,10 @@ pub struct CreatePeerReq {
     #[schema(example = "198.51.100.1:51820")]
     pub endpoint: Option<String>,
 
+    pub challenge: Challenge
+
 }
+
 
 
 
@@ -41,12 +55,15 @@ pub struct UpdatePeerReq {
     pub endpoint: Option<String>,
     // // optionally change status to suspend or resume the peer
     // pub status: Option<PeerStatus>,
+    pub challenge: Challenge
 }
 
 #[derive(Debug, Deserialize,ToSchema)]
 pub struct DeletePeerReq {
     #[schema(example = 4242421234u32)]
     pub asn: u32,
+
+    pub challenge: Challenge
 }
 
 // root response structure for peering requests
@@ -110,6 +127,7 @@ pub struct AppState {
     pub local_wg_privkey: String,
 }
 
+// TODO: Optimize
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AuthorizeFail {
     message: String
@@ -188,6 +206,11 @@ pub async fn delete_peer(
     paths(create_peer),
     // all nested schemas must be declared here explicitly
     components(schemas(
+        Challenge,
+
+        AuthorizeFail,
+        CatchFail,
+
         CreatePeerReq, 
         PeerResponse, 
         WgConfig, 
