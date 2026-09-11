@@ -152,7 +152,7 @@ pub async fn create_peer(
 }
 
 #[utoipa::path(
-    post,
+    patch,
     path = "/api/peers",
     request_body = UpdatePeerReq,
     responses(
@@ -164,14 +164,14 @@ pub async fn create_peer(
 )]
 pub async fn update_peer(
     State(state): State<AppState>,
-    Json(payload): Json<CreatePeerReq>,
+    Json(payload): Json<UpdatePeerReq>,
 ) -> Result<Json<PeerResponse>, PeerError> {
     // 你的业务逻辑...
     todo!()
 }
 
 #[utoipa::path(
-    post,
+    delete,
     path = "/api/peers",
     request_body = DeletePeerReq,
     responses(
@@ -183,7 +183,7 @@ pub async fn update_peer(
 )]
 pub async fn delete_peer(
     State(state): State<AppState>,
-    Json(payload): Json<CreatePeerReq>,
+    Json(payload): Json<DeletePeerReq>,
 ) -> Result<Json<PeerResponse>, PeerError> {
     // 你的业务逻辑...
     todo!()
