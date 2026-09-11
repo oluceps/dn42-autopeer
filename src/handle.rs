@@ -127,19 +127,10 @@ pub struct AppState {
     pub local_wg_privkey: String,
 }
 
-// TODO: Optimize
-#[derive(Debug, Serialize, ToSchema)]
-pub struct AuthorizeFail {
-    message: String
-}
-#[derive(Debug, Serialize, ToSchema)]
-pub struct CatchFail {
-    message: String
-}
-
 use axum::{Json, extract::State};
 
-use crate::{peer::Peer, peer::PeerStatus, error::PeerError};
+use crate::error::{ErrorResponse, PeerError};
+use crate::peer::Peer;
 
 #[utoipa::path(
     post,
@@ -147,8 +138,8 @@ use crate::{peer::Peer, peer::PeerStatus, error::PeerError};
     request_body = CreatePeerReq,
     responses(
         (status = 201, description = "Peer successfully configured", body = PeerResponse),
-        (status = 403, description = "Unsuccessful Challenge", body = AuthorizeFail ),
-        (status = 400, description = "Section Invalid", body = CatchFail)
+        (status = 403, description = "Challenge verification failed", body = ErrorResponse),
+        (status = 400, description = "Request validation failed", body = ErrorResponse)
     ),
     tag = "Peering"
 )]
@@ -166,8 +157,8 @@ pub async fn create_peer(
     request_body = UpdatePeerReq,
     responses(
         (status = 201, description = "Peer successfully configured", body = PeerResponse),
-        (status = 403, description = "Unsuccessful Challenge", body = AuthorizeFail ),
-        (status = 400, description = "Section Invalid", body = CatchFail)
+        (status = 403, description = "Challenge verification failed", body = ErrorResponse),
+        (status = 400, description = "Request validation failed", body = ErrorResponse)
     ),
     tag = "Peering"
 )]
@@ -185,8 +176,8 @@ pub async fn update_peer(
     request_body = DeletePeerReq,
     responses(
         (status = 201, description = "Peer successfully configured", body = PeerResponse),
-        (status = 403, description = "Unsuccessful Challenge", body = AuthorizeFail ),
-        (status = 400, description = "Section Invalid", body = CatchFail)
+        (status = 403, description = "Challenge verification failed", body = ErrorResponse),
+        (status = 400, description = "Request validation failed", body = ErrorResponse)
     ),
     tag = "Peering"
 )]
@@ -208,8 +199,7 @@ pub async fn delete_peer(
     components(schemas(
         Challenge,
 
-        AuthorizeFail,
-        CatchFail,
+        ErrorResponse,
 
         CreatePeerReq, 
         PeerResponse, 

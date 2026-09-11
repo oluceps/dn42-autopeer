@@ -1,7 +1,12 @@
+use axum::Json;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde::Serialize;
 use snafu::{ResultExt, prelude::*};
 use std::net::AddrParseError;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use utoipa::ToSchema;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -16,6 +21,9 @@ pub enum PubKeyError {
 pub enum PeerError {
     #[snafu(display("failed to parse ip address '{ip}': {source}"))]
     InvalidIp { source: AddrParseError, ip: String },
+
+    #[snafu(display("peer asn {asn} is not allowed (must be in dn42 range)"))]
+    InvalidAsn { asn: u32 },
 
     #[snafu(display("failed to manipulate netlink interface '{iface_name}': {source}"))]
     Netlink {
@@ -32,8 +40,58 @@ pub enum PeerError {
     #[snafu(display("bird syntax check or reload failed. stderr: {stderr}"))]
     BirdReload { stderr: String },
 
-    #[snafu(display("peer asn {asn} is not allowed (must be in dn42 range)"))]
-    InvalidAsn { asn: u32 },
+    #[snafu(display("challenge verification failed: {detail}"))]
+    UnauthorizedChallenge { detail: String },
+
+    #[snafu(display("invalid request: {detail}"))]
+    Validation { detail: String },
+}
+
+// unified api error response body: a stable machine-readable code plus
+// optional human-readable detail, so 4xx/5xx responses carry real info.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorResponse {
+    #[schema(example = "unauthorized_challenge")]
+    pub error: String,
+    #[schema(example = "signature verification failed: bad signature")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl IntoResponse for PeerError {
+    fn into_response(self) -> Response {
+        let (status, error, detail) = match self {
+            PeerError::UnauthorizedChallenge { detail } => (
+                StatusCode::FORBIDDEN,
+                "unauthorized_challenge".to_string(),
+                Some(detail),
+            ),
+            PeerError::InvalidIp { ip, .. } => (
+                StatusCode::BAD_REQUEST,
+                "invalid_ip".to_string(),
+                Some(format!("ip '{ip}' is not parseable")),
+            ),
+            PeerError::InvalidAsn { asn } => (
+                StatusCode::BAD_REQUEST,
+                "invalid_asn".to_string(),
+                Some(format!("asn {asn} not in dn42 range")),
+            ),
+            PeerError::Validation { detail } => (
+                StatusCode::BAD_REQUEST,
+                "validation_failed".to_string(),
+                Some(detail),
+            ),
+            // everything below is a server-side failure
+            PeerError::Netlink { .. }
+            | PeerError::BirdConfigIo { .. }
+            | PeerError::BirdReload { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error".to_string(),
+                None,
+            ),
+        };
+        (status, Json(ErrorResponse { error, detail })).into_response()
+    }
 }
 
 pub struct PeerManager {
