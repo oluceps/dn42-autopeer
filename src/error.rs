@@ -82,6 +82,7 @@ impl IntoResponse for PeerError {
                 Some(detail),
             ),
             // everything below is a server-side failure
+            // TODO: handle
             PeerError::Netlink { .. }
             | PeerError::BirdConfigIo { .. }
             | PeerError::BirdReload { .. } => (

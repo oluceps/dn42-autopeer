@@ -194,7 +194,7 @@ pub async fn delete_peer(
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(create_peer),
+    paths(create_peer, update_peer, delete_peer),
     // all nested schemas must be declared here explicitly
     components(schemas(
         Challenge,
@@ -202,9 +202,11 @@ pub async fn delete_peer(
         ErrorResponse,
 
         CreatePeerReq, 
+        UpdatePeerReq,
+        DeletePeerReq,
         PeerResponse, 
         WgConfig, 
         BgpConfig
     ))
 )]
-struct ApiDoc;
+pub struct ApiDoc;
