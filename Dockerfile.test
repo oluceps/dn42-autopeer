@@ -1,0 +1,17 @@
+FROM docker.io/library/rust:slim
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y bird2 postgresql-client curl iproute2 procps sudo mold python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install just
+RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+
+# Install nushell
+RUN curl https://mise.run | sh && \
+    ~/.local/bin/mise use -g nushell@latest
+
+ENV PATH="/root/.local/share/mise/shims:$PATH"
+
+WORKDIR /workspace

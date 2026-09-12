@@ -12,10 +12,11 @@ A high-performance, highly-engineered, and strictly declarative automated peerin
 
 ## Core Design Principles
 
-### 1. Decentralized Challenge-Response Authentication
-No passwords, API tokens, or secrets are stored in the database. Authentication is cryptographically bound to the public DN42 Registry.
-- **Workflow**: The frontend fetches the user's registered PGP/SSH public keys from the DN42 Registry. The user requests a cryptographic nonce from `/api/auth/challenge`, signs it with their private key, and submits the signature to `/api/auth/verify`.
-- **Benefit**: Absolute mathematical security. The DN42 Whois Registry acts as the Single Source of Truth (SSoT).
+### 1. Stateless Cryptographic Authentication (SSH-SIG)
+No passwords, API tokens, or secrets are stored in the database. Authentication is cryptographically bound to the public DN42 Registry in a completely stateless manner.
+- **Anti-Replay Signatures**: Users must sign a deterministic payload declaring their exact intent (e.g., `ASN:<asn>|PUBKEY:<wg_pubkey>` or `ASN:<asn>|DELETE`) using their `ssh-ed25519` private key via standard `ssh-keygen -Y sign`.
+- **Registry Integration**: Upon receiving a request, the backend cryptographically verifies the SSH signature, then dynamically fetches the user's `mntner` object from the DN42 Registry API (`explorer.burble.com`). If the provided SSH public key exactly matches the `auth` attribute of the ASN's maintainer, the request is authorized.
+- **Benefit**: Absolute mathematical security and zero-setup authentication. The DN42 Whois Registry acts as the Single Source of Truth (SSoT).
 
 ### 2. Config Generation: Strong Typing & Anti-Injection
 Abandons error-prone string concatenation (`format!`). Employs the **Askama** template engine with precompiled BIRD configuration fragments.

@@ -4,28 +4,13 @@ use std::net::Ipv6Addr;
 // the #[derive(Template)] macro reads the file at compile time
 // and implements the render() method automatically.
 #[derive(Template)]
-#[template(path = "dn42_peer.conf")]
-pub struct PeerConfigTemplate<'a> {
-    pub iface_name: &'a str,
-    pub protocol_name: String,  // dynamic strings can be owned or borrowed
-    pub remote_ll_ip: Ipv6Addr, // askama automatically calls .to_string() for standard types
+#[template(path = "peer.conf")]
+pub struct PeerTemplate<'a> {
     pub asn: u32,
+    pub local_asn: u32,
+    pub iface: &'a str,
     pub local_ll_ip: Ipv6Addr,
-}
-
-// usage example in your route handler:
-fn generate_config() {
-    let tmpl = PeerConfigTemplate {
-        iface_name: "wg-peer-4242",
-        protocol_name: "wg_peer_4242".to_string(),
-        remote_ll_ip: "fe80::2".parse().unwrap(),
-        asn: 4242420000,
-        local_ll_ip: "fe80::1".parse().unwrap(),
-    };
-
-    // renders the elegant way, returns a string
-    let bird_conf = tmpl.render().unwrap();
-    println!("{}", bird_conf);
+    pub remote_ll_ip: Ipv6Addr,
 }
 
 // ==========================================
@@ -73,5 +58,44 @@ impl AskamaEscaper for Escaper {
             c if c.is_ascii_control() => Ok(()),
             _ => dest.write_char(c),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_peer_template_rendering() {
+        let tmpl = PeerTemplate {
+            asn: 4242421234,
+            local_asn: 4242420291,
+            iface: "wg-peer-4242",
+            local_ll_ip: Ipv6Addr::from_str("fe80::1").unwrap(),
+            remote_ll_ip: Ipv6Addr::from_str("fe80::2").unwrap(),
+        };
+
+        let result = tmpl.render().unwrap();
+        assert!(result.contains("protocol bgp dn42_4242421234"));
+        assert!(result.contains("local fe80::1 as 4242420291;"));
+        assert!(result.contains("neighbor fe80::2 % 'wg-peer-4242' as 4242421234;"));
+        assert!(result.contains("table dn42_v6;"));
+    }
+
+    #[test]
+    fn test_escaper_prevents_injection() {
+        let tmpl = PeerTemplate {
+            asn: 4242421234,
+            local_asn: 4242420291,
+            iface: "wg-peer';\n  include \"/etc/shadow\";\n  #",
+            local_ll_ip: Ipv6Addr::from_str("fe80::1").unwrap(),
+            remote_ll_ip: Ipv6Addr::from_str("fe80::2").unwrap(),
+        };
+
+        let result = tmpl.render().unwrap();
+        // The template engine only escapes the variables!
+        // Let's check if the injected newline in `iface` is replaced by space.
+        assert!(result.contains("wg-peer';   include \\\"/etc/shadow\\\";   #"));
     }
 }

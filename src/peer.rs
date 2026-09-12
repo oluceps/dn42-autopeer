@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv6Addr, SocketAddr};
 
+use crate::wg_pubkey::WgPubKey;
+
 // represents a fully resolved, active wireguard and bgp peer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {
@@ -9,7 +11,7 @@ pub struct Peer {
     // dn42 autonomous system number
     pub asn: u32,
     // wireguard public key in base64
-    pub pubkey: String,
+    pub pubkey: WgPubKey,
     // remote endpoint, optional for roaming peers
     pub endpoint: Option<SocketAddr>,
     // the local ipv6 link-local address assigned to our side of the wg interface
