@@ -59,6 +59,12 @@ pub enum PeerError {
 
     #[snafu(display("Provided SSH key is not identical with DN42 registry records"))]
     RegistryMismatch,
+
+    #[snafu(display("Peer with ASN {asn} not found"))]
+    NotFound { asn: u32 },
+
+    #[snafu(display("Peer with ASN {asn} already exists"))]
+    AlreadyExists { asn: u32 },
 }
 
 // unified api error response body: a stable machine-readable code plus
@@ -115,6 +121,16 @@ impl IntoResponse for PeerError {
                 StatusCode::FORBIDDEN,
                 "registry_mismatch".to_string(),
                 Some("Provided SSH key is not identical with DN42 registry records".to_string()),
+            ),
+            PeerError::NotFound { asn } => (
+                StatusCode::NOT_FOUND,
+                "not_found".to_string(),
+                Some(format!("Peer with ASN {} not found", asn)),
+            ),
+            PeerError::AlreadyExists { asn } => (
+                StatusCode::CONFLICT,
+                "already_exists".to_string(),
+                Some(format!("Peer with ASN {} already exists", asn)),
             ),
             // everything below is a server-side failure
             // TODO: handle

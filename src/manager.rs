@@ -23,6 +23,10 @@ impl PeerManager {
         Self { db, bird_conf_dir, local_wg_privkey, local_asn }
     }
 
+    pub async fn peer_exists(&self, asn: u32) -> Result<bool, PeerError> {
+        self.db.peer_exists(asn).await
+    }
+
     pub async fn upsert_peer(
         &self,
         asn: u32,
@@ -121,7 +125,12 @@ impl PeerManager {
             handle.link().del(link.header.index).execute().await.ok();
         }
 
-        // Ideally we also mark as deleted in DB
+        // Delete from DB
+        let deleted = self.db.delete_peer(asn).await?;
+        if !deleted {
+            return Err(PeerError::NotFound { asn });
+        }
+
         Ok(())
     }
 

@@ -76,4 +76,23 @@ impl PeerStore {
 
         Ok(())
     }
+
+    pub async fn delete_peer(&self, asn: u32) -> Result<bool, PeerError> {
+        let result = sqlx::query("DELETE FROM peers WHERE asn = $1")
+            .bind(asn as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(|source| PeerError::Database { source })?;
+        
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn peer_exists(&self, asn: u32) -> Result<bool, PeerError> {
+        let (exists,): (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM peers WHERE asn = $1)")
+            .bind(asn as i64)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|source| PeerError::Database { source })?;
+        Ok(exists)
+    }
 }

@@ -34,6 +34,10 @@ async fn main() {
     println!("Using BIRD config dir: {}", bird_conf_dir);
 
     let wg_privkey = std::env::var("WG_PRIVATE_KEY").unwrap_or_else(|_| "q1z/aK6XjHhKxXjVvV/5lD9hW2l8aU+21u6Vz9+Y1gQ=".to_string());
+    let local_asn = std::env::var("LOCAL_ASN")
+        .unwrap_or_else(|_| "4242420291".to_string())
+        .parse::<u32>()
+        .expect("LOCAL_ASN must be a valid u32 integer");
     
     let db = PeerStore::new().await.expect("Failed to initialize database");
     
@@ -41,7 +45,7 @@ async fn main() {
         db,
         bird_conf_dir,
         wg_privkey,
-        4242420291, // local ASN
+        local_asn, // local ASN
     ));
 
     let state = AppState {

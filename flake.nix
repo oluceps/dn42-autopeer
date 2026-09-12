@@ -111,7 +111,7 @@
               { pkgs, ... }:
               {
                 imports = [ ./module ];
-                autopeer.package = (self.overlays.default pkgs pkgs).autopeer;
+                services.autopeer.package = (self.overlays.default pkgs pkgs).autopeer;
               };
             autopeer = default;
           };

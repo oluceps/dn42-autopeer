@@ -5,3 +5,4 @@ test.json
 book
 /.pre-commit-config.yaml
 /vendor
+/tests

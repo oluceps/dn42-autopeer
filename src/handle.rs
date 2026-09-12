@@ -145,6 +145,10 @@ pub async fn create_peer(
     let expected_msg = crate::challenge::build_expected_message(payload.asn, Some(&payload.pubkey));
     crate::challenge::authorize_request(payload.asn, &payload.challenge.auth, &payload.challenge.signature, &expected_msg).await?;
 
+    if state.manager.peer_exists(payload.asn).await? {
+        return Err(PeerError::AlreadyExists { asn: payload.asn });
+    }
+
     let endpoint = payload.endpoint.as_deref().map(SocketAddr::from_str).transpose()
         .map_err(|_| PeerError::Validation { detail: "Invalid endpoint format".to_string() })?;
 
@@ -185,6 +189,10 @@ pub async fn update_peer(
 ) -> Result<Json<PeerResponse>, PeerError> {
     let expected_msg = crate::challenge::build_expected_message(payload.asn, Some(&payload.pubkey));
     crate::challenge::authorize_request(payload.asn, &payload.challenge.auth, &payload.challenge.signature, &expected_msg).await?;
+
+    if !state.manager.peer_exists(payload.asn).await? {
+        return Err(PeerError::NotFound { asn: payload.asn });
+    }
 
     let endpoint = payload.endpoint.as_deref().map(SocketAddr::from_str).transpose()
         .map_err(|_| PeerError::Validation { detail: "Invalid endpoint format".to_string() })?;
