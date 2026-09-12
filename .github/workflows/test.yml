@@ -1,0 +1,51 @@
+name: Integration CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: "postgres://dummy:dummy@127.0.0.1:5432/dummy"
+  BIRD_CONF_DIR: "/tmp/dn42-peers"
+
+jobs:
+  test:
+    name: Test and Integration on Ubuntu
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies (Nushell & Just)
+        run: |
+          # Install just
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+          
+          # Install nushell
+          curl -LSfs https://jdx.dev/mise/install.sh | sh
+          ~/.local/bin/mise use -g nushell@latest
+          echo "~/.local/share/mise/installs/nushell/latest/bin" >> $GITHUB_PATH
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run Clippy lints
+        run: cargo clippy -- -D warnings
+
+      - name: Run unit tests
+        run: cargo test --verbose
+
+      - name: Run Containerized API Integration Tests
+        run: just test
