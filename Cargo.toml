@@ -21,6 +21,6 @@ sqlx = {version="0.9.0",features=["postgres", "runtime-tokio", "tls-rustls"]}
 ssh-key = { version = "0.6.7", features = ["ed25519", "crypto"] }
 tokio = { version = "1.53.1", features = ["full"] }
 url = "2.5.8"
-utoipa = {version="5.5.0",features = ["axum_extras"]}
+utoipa = { version = "5.5.0", features = ["axum_extras"] }
 utoipa-swagger-ui = {version="9.0.2",features=["axum"]}
 wireguard-control = "2.0.0"

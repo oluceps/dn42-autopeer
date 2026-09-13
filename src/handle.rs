@@ -19,21 +19,29 @@ pub struct Challenge {
 }
 
 
-// payload received from restful post request to create a peer
+/// Payload received from restful POST request to create a peer
+///
+/// This structure provides the necessary properties to initialize a new WireGuard
+/// and BGP peering session on this node.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePeerReq {
+    /// The Autonomous System Number of the peering requestor.
+    /// Used for the BGP session configuration.
     #[schema(example = 4242421234u32)]
     pub asn: u32,
 
+    /// The base64-encoded WireGuard Public Key.
     #[schema(example = "xyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyz=", value_type = String)]
     pub pubkey: WgPubKey,
 
-    // endpoint string, e.g., "198.51.100.1:51820", can be none
+    /// (Optional) Endpoint string formatted as `IP:PORT`.
+    /// 
+    /// If omitted, the peer is considered floating (useful for dynamic IPs/roaming clients).
     #[schema(example = "198.51.100.1:51820")]
     pub endpoint: Option<String>,
 
+    /// Cryptographic challenge payload proving ownership of the registered ASN.
     pub challenge: Challenge
-
 }
 
 
@@ -130,6 +138,8 @@ use crate::error::{ErrorResponse, PeerError};
 #[utoipa::path(
     post,
     path = "/api/peers",
+    summary = "Create and configure a new DN42 BGP peer",
+    description = "Authenticates the peer using a cryptographic challenge (PGP/SSH) verifying their ASN ownership, then automatically provisions a WireGuard interface and generates the corresponding BIRD 2 BGP configuration for the peer.",
     request_body = CreatePeerReq,
     responses(
         (status = 201, description = "Peer successfully configured", body = PeerResponse),
@@ -175,11 +185,13 @@ pub async fn create_peer(
 #[utoipa::path(
     patch,
     path = "/api/peers",
+    summary = "Update an existing peer's configuration",
+    description = "Allows an authenticated peer to update their WireGuard endpoint IP/Port or their WireGuard public key dynamically. A valid cryptographic challenge is required.",
     request_body = UpdatePeerReq,
     responses(
-        (status = 201, description = "Peer successfully configured", body = PeerResponse),
-        (status = 403, description = "Challenge verification failed", body = ErrorResponse),
-        (status = 400, description = "Request validation failed", body = ErrorResponse)
+        (status = 200, description = "Peer successfully updated", body = PeerResponse),
+        (status = 404, description = "Peer not found", body = ErrorResponse),
+        (status = 403, description = "Challenge verification failed", body = ErrorResponse)
     ),
     tag = "Peering"
 )]
@@ -220,11 +232,13 @@ pub async fn update_peer(
 #[utoipa::path(
     delete,
     path = "/api/peers",
+    summary = "Remove an existing peer",
+    description = "Tears down the BGP session and removes the WireGuard interface configuration for the authenticated peer. Requires a valid cryptographic challenge to prevent unauthorized teardowns.",
     request_body = DeletePeerReq,
     responses(
-        (status = 201, description = "Peer successfully configured", body = PeerResponse),
-        (status = 403, description = "Challenge verification failed", body = ErrorResponse),
-        (status = 400, description = "Request validation failed", body = ErrorResponse)
+        (status = 200, description = "Peer successfully removed"),
+        (status = 404, description = "Peer not found", body = ErrorResponse),
+        (status = 403, description = "Challenge verification failed", body = ErrorResponse)
     ),
     tag = "Peering"
 )]
@@ -260,19 +274,19 @@ pub async fn delete_peer(
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(create_peer, update_peer, delete_peer),
-    // all nested schemas must be declared here explicitly
-    components(schemas(
-        Challenge,
-
-        ErrorResponse,
-
-        CreatePeerReq, 
-        UpdatePeerReq,
-        DeletePeerReq,
-        PeerResponse, 
-        WgConfig, 
-        BgpConfig
-    ))
+    info(
+        title = "DN42 Autopeer API",
+        description = "Automated peering setup and configuration API for DN42 networks.",
+        version = "1.0.0",
+        contact(name = "DN42 Admin")
+    ),
+    paths(
+        create_peer,
+        update_peer,
+        delete_peer
+    ),
+    components(
+        schemas(CreatePeerReq, UpdatePeerReq, DeletePeerReq, Challenge, PeerResponse, WgConfig, BgpConfig, ErrorResponse)
+    )
 )]
 pub struct ApiDoc;
