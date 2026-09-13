@@ -28,10 +28,8 @@ jobs:
       - name: Install mise and nushell
         uses: jdx/mise-action@v2
         with:
-          install: false
-          
-      - name: Setup nushell via mise
-        run: mise use -g nushell@latest
+          tool_versions: |
+            nushell latest
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
