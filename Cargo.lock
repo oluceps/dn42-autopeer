@@ -611,9 +611,9 @@ checksum = "fd121741cf3eb82c08dd3023eb55bf2665e5f60ec20f89760cf836ae4562e6a0"
 
 [[package]]
 name = "crc32fast"
-version = "1.5.1"
+version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
+checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
 dependencies = [
  "cfg-if",
 ]
@@ -903,6 +903,32 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.5",
+]
+
+[[package]]
+name = "dn42-autopeer"
+version = "0.1.0"
+dependencies = [
+ "askama",
+ "axum",
+ "base64 0.23.1",
+ "dashmap",
+ "futures",
+ "hex",
+ "netlink-packet-route 0.33.0",
+ "pgp",
+ "reqwest",
+ "rtnetlink",
+ "serde",
+ "serde_json",
+ "snafu",
+ "sqlx",
+ "ssh-key",
+ "tokio",
+ "url",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "wireguard-control",
 ]
 
 [[package]]
@@ -2176,32 +2202,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "nyaw-dn42-autopeer"
-version = "0.1.0"
-dependencies = [
- "askama",
- "axum",
- "base64 0.23.1",
- "dashmap",
- "futures",
- "hex",
- "netlink-packet-route 0.33.0",
- "pgp",
- "reqwest",
- "rtnetlink",
- "serde",
- "serde_json",
- "snafu",
- "sqlx",
- "ssh-key",
- "tokio",
- "url",
- "utoipa",
- "utoipa-swagger-ui",
- "wireguard-control",
 ]
 
 [[package]]
