@@ -234,11 +234,7 @@ impl PeerManager {
             response_output.push_str(&line);
             if line.len() >= 5 && line.as_bytes()[4] == b' ' {
                 let code = &line[0..4];
-                if code.starts_with('8') || code.starts_with('9') {
-                    success = false;
-                } else {
-                    success = true;
-                }
+                success = !(code.starts_with('8') || code.starts_with('9'));
                 break;
             }
         }
