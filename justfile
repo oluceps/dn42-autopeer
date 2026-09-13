@@ -107,14 +107,14 @@ test-api:
 
     } catch { |err|
         print $"Test encountered an error: ($err)"
-        bash -c $"kill -TERM ($server_pid)"
+        bash -c $"kill -TERM ($server_pid) || true"
         exit 1
     }
     
     # ======== Environment Cleanup ========
     print "========== [7] Terminate Server and Test RAII =========="
     # Send SIGTERM to trigger Axum graceful shutdown and PeerManager Drop
-    bash -c $"kill -TERM ($server_pid)"
+    bash -c $"kill -TERM ($server_pid) || true"
     print "Waiting for server graceful shutdown and Drop resource reclamation..."
     sleep 2sec
     
