@@ -63,8 +63,6 @@ in
       ];
       wantedBy = [ "multi-user.target" ];
 
-      path = [ pkgs.bird3 ];
-
       environment = {
         PORT = toString cfg.port;
         BIRD_CONF_DIR = cfg.birdConfDir;
