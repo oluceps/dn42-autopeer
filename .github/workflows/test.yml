@@ -20,17 +20,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install System Dependencies (Nushell & Just & Mold)
-        run: |
-          sudo apt-get update && sudo apt-get install -y mold
+      - name: Install System Dependencies (Mold)
+        run: sudo apt-get update && sudo apt-get install -y mold
 
-          # Install just
-          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
-          
-          # Install nushell
-          curl -LSfs https://jdx.dev/mise/install.sh | sh
-          ~/.local/bin/mise use -g nushell@latest
-          echo "~/.local/share/mise/installs/nushell/latest/bin" >> $GITHUB_PATH
+      - name: Install Just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Setup Nushell
+        uses: jdx/mise-action@v4
+        with:
+          tool_versions: |
+            nushell latest
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
