@@ -158,7 +158,8 @@ pub struct AppJson<T>(pub T);
 
 impl<T, S> axum::extract::FromRequest<S> for AppJson<T>
 where
-    axum::Json<T>: axum::extract::FromRequest<S, Rejection = axum::extract::rejection::JsonRejection>,
+    axum::Json<T>:
+        axum::extract::FromRequest<S, Rejection = axum::extract::rejection::JsonRejection>,
     S: Send + Sync,
 {
     type Rejection = (StatusCode, Json<ErrorResponse>);
