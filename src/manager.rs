@@ -1,5 +1,7 @@
 use std::{path::Path, net::{Ipv6Addr, SocketAddr}};
 use snafu::ResultExt;
+use tokio::net::UnixStream;
+use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
 use crate::{
     peer::{Peer, PeerStatus},
     persist::PeerStore,
@@ -9,18 +11,20 @@ use crate::{
     template::PeerTemplate,
 };
 use askama::Template;
-use tokio::process::Command;
 
 pub struct PeerManager {
     db: PeerStore,
     bird_conf_dir: String,
+    bird_socket: String,
     local_wg_privkey: String,
-    local_asn: u32,
+    pub local_wg_pubkey: String,
+    pub public_endpoint: String,
+    pub local_asn: u32,
 }
 
 impl PeerManager {
-    pub fn new(db: PeerStore, bird_conf_dir: String, local_wg_privkey: String, local_asn: u32) -> Self {
-        Self { db, bird_conf_dir, local_wg_privkey, local_asn }
+    pub fn new(db: PeerStore, bird_conf_dir: String, bird_socket: String, local_wg_privkey: String, local_wg_pubkey: String, public_endpoint: String, local_asn: u32) -> Self {
+        Self { db, bird_conf_dir, bird_socket, local_wg_privkey, local_wg_pubkey, public_endpoint, local_asn }
     }
 
     pub async fn peer_exists(&self, asn: u32) -> Result<bool, PeerError> {
@@ -135,15 +139,50 @@ impl PeerManager {
     }
 
     async fn reload_bird(&self) -> Result<(), PeerError> {
-        let output = Command::new("birdc")
-            .args(["configure", "soft"])
-            .output()
-            .await
-            .map_err(|e| PeerError::BirdConfigIo { source: e, path: std::path::PathBuf::from("birdc") })?;
-        
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(PeerError::BirdReload { stderr: stderr.into_owned() });
+        let mut stream = UnixStream::connect(&self.bird_socket).await
+            .map_err(|e| PeerError::BirdConfigIo { source: e, path: std::path::PathBuf::from(&self.bird_socket) })?;
+
+        let (read_half, mut write_half) = stream.split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+
+        // 1. Read the welcome banner
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                return Err(PeerError::BirdReload { stderr: "BIRD socket closed early".to_string() });
+            }
+            if line.len() >= 5 && line.as_bytes()[4] == b' ' {
+                break;
+            }
+        }
+
+        // 2. Send configure soft
+        write_half.write_all(b"configure soft\n").await
+            .map_err(|e| PeerError::BirdConfigIo { source: e, path: std::path::PathBuf::from(&self.bird_socket) })?;
+
+        // 3. Read the response
+        let mut response_output = String::new();
+        let mut success = false;
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                break;
+            }
+            response_output.push_str(&line);
+            if line.len() >= 5 && line.as_bytes()[4] == b' ' {
+                let code = &line[0..4];
+                if code.starts_with('8') || code.starts_with('9') {
+                    success = false;
+                } else {
+                    success = true;
+                }
+                break;
+            }
+        }
+
+        if !success {
+            return Err(PeerError::BirdReload { stderr: response_output.trim().to_string() });
         }
         Ok(())
     }
@@ -167,3 +206,75 @@ impl Drop for PeerManager {
         println!("Cleanup complete.");
     }
 }
+
+/*
+#[cfg(test)]
+mod tests {
+
+    use tokio::net::UnixStream;
+    use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
+
+    // Note: this test requires the bird socket to be accessible by the runner.
+    // E.g., `sudo -u bird cargo test test_bird_socket_protocol -- --nocapture`
+    #[tokio::test]
+    #[ignore = "Requires BIRD socket permissions locally"]
+    async fn test_bird_socket_protocol() {
+        let bird_socket = std::env::var("BIRD_SOCKET").unwrap_or_else(|_| "/run/bird/bird.ctl".to_string());
+        
+        let mut stream = match UnixStream::connect(&bird_socket).await {
+            Ok(s) => s,
+            Err(e) => {
+                println!("Could not connect to {}: {}. Skipping test.", bird_socket, e);
+                return;
+            }
+        };
+
+        let (read_half, mut write_half) = stream.split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+
+        println!("Reading BIRD banner...");
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).await.expect("Failed to read");
+            if n == 0 {
+                panic!("BIRD socket closed early during banner");
+            }
+            print!("BANNER: {}", line);
+            if line.len() >= 5 && line.as_bytes()[4] == b' ' {
+                break;
+            }
+        }
+
+        println!("Sending configure soft...");
+        write_half.write_all(b"configure soft\n").await.expect("Failed to write");
+
+        println!("Reading response...");
+        let mut response_output = String::new();
+        let mut success = false;
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).await.expect("Failed to read");
+            if n == 0 {
+                break;
+            }
+            print!("REPLY: {}", line);
+            response_output.push_str(&line);
+            if line.len() >= 5 && line.as_bytes()[4] == b' ' {
+                let code = &line[0..4];
+                if code.starts_with('8') || code.starts_with('9') {
+                    success = false;
+                } else {
+                    success = true;
+                }
+                break;
+            }
+        }
+
+        println!("Final success status: {}", success);
+        println!("Full captured output:\n{}", response_output);
+        
+        assert!(success || !response_output.is_empty(), "Either it succeeds or returns an error message");
+    }
+}
+*/

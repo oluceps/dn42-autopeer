@@ -4,6 +4,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use tower_http::cors::{CorsLayer, Any};
 
 mod error;
 mod challenge;
@@ -34,6 +35,9 @@ async fn main() {
     println!("Using BIRD config dir: {}", bird_conf_dir);
 
     let wg_privkey = std::env::var("WG_PRIVATE_KEY").unwrap_or_else(|_| "q1z/aK6XjHhKxXjVvV/5lD9hW2l8aU+21u6Vz9+Y1gQ=".to_string());
+    let wg_pubkey = std::env::var("WG_PUBLIC_KEY").unwrap_or_else(|_| "dummy_pubkey_replace_me=".to_string());
+    let public_endpoint = std::env::var("PUBLIC_ENDPOINT").unwrap_or_else(|_| "dn42-node.example.com".to_string());
+    let bird_socket = std::env::var("BIRD_SOCKET").unwrap_or_else(|_| "/run/bird/bird.ctl".to_string());
     let local_asn = std::env::var("LOCAL_ASN")
         .unwrap_or_else(|_| "4242420291".to_string())
         .parse::<u32>()
@@ -44,7 +48,10 @@ async fn main() {
     let peer_manager = Arc::new(PeerManager::new(
         db,
         bird_conf_dir,
+        bird_socket,
         wg_privkey,
+        wg_pubkey,
+        public_endpoint,
         local_asn, // local ASN
     ));
 
@@ -52,10 +59,16 @@ async fn main() {
         manager: peer_manager,
     };
 
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let app = Router::new()
         .route("/api/peers", post(create_peer).patch(update_peer).delete(delete_peer))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-        .with_state(state);
+        .with_state(state)
+        .layer(cors);
 
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string())

@@ -169,12 +169,12 @@ pub async fn create_peer(
         message: "Peer successfully configured in BIRD and Kernel.".to_string(),
         wg_config: WgConfig {
             your_assigned_ip: format!("{}/64", peer.remote_ll_ip),
-            my_endpoint: "dn42-node.example.com:20000".to_string(), // Need to get public IP
-            my_pubkey: "dummy_pubkey".to_string(),
+            my_endpoint: format!("{}:{}", state.manager.public_endpoint, 20000 + (payload.asn % 10000) as u16),
+            my_pubkey: state.manager.local_wg_pubkey.clone(),
             allowed_ips: "0.0.0.0/0, ::/0".to_string(),
         },
         bgp_config: BgpConfig {
-            my_asn: 4242420291,
+            my_asn: state.manager.local_asn,
             my_neighbor_ip: peer.local_ll_ip.to_string(),
             multiprotocol: true,
             extended_next_hop: true,
@@ -216,12 +216,12 @@ pub async fn update_peer(
         message: "Peer successfully updated.".to_string(),
         wg_config: WgConfig {
             your_assigned_ip: format!("{}/64", peer.remote_ll_ip),
-            my_endpoint: "dn42-node.example.com:20000".to_string(),
-            my_pubkey: "dummy_pubkey".to_string(),
+            my_endpoint: format!("{}:{}", state.manager.public_endpoint, 20000 + (payload.asn % 10000) as u16),
+            my_pubkey: state.manager.local_wg_pubkey.clone(),
             allowed_ips: "0.0.0.0/0, ::/0".to_string(),
         },
         bgp_config: BgpConfig {
-            my_asn: 4242420291,
+            my_asn: state.manager.local_asn,
             my_neighbor_ip: peer.local_ll_ip.to_string(),
             multiprotocol: true,
             extended_next_hop: true,
