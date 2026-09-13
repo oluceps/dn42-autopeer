@@ -1,7 +1,10 @@
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use crate::{
+    error::PeerError,
+    peer::{Peer, PeerStatus},
+};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::env;
 use std::str::FromStr;
-use crate::{peer::{Peer, PeerStatus}, error::PeerError};
 
 pub struct PeerStore {
     pool: PgPool,
@@ -9,8 +12,9 @@ pub struct PeerStore {
 
 impl PeerStore {
     pub async fn new() -> Result<Self, PeerError> {
-        let db_url = env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://dn42-bot@localhost/dn42".to_string());
-        
+        let db_url = env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://dn42-bot@localhost/dn42".to_string());
+
         let mut opts = sqlx::postgres::PgConnectOptions::from_str(&db_url)
             .map_err(|source| PeerError::Database { source })?;
 
@@ -19,9 +23,11 @@ impl PeerStore {
         // We use the url crate to extract the host and strip the brackets manually.
         if let Ok(parsed_url) = url::Url::parse(&db_url)
             && let Some(host) = parsed_url.host_str()
-                && host.starts_with('[') && host.ends_with(']') {
-                    opts = opts.host(&host[1..host.len()-1]);
-                }
+            && host.starts_with('[')
+            && host.ends_with(']')
+        {
+            opts = opts.host(&host[1..host.len() - 1]);
+        }
 
         let pool = PgPoolOptions::new()
             .max_connections(5)
@@ -44,7 +50,7 @@ impl PeerStore {
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )
-            "#
+            "#,
         )
         .execute(&pool)
         .await
@@ -60,7 +66,7 @@ impl PeerStore {
             PeerStatus::Disabled => "disabled",
             PeerStatus::Error(_) => "error",
         };
-        
+
         sqlx::query(
             r#"
             INSERT INTO peers (asn, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port)
@@ -96,16 +102,17 @@ impl PeerStore {
             .execute(&self.pool)
             .await
             .map_err(|source| PeerError::Database { source })?;
-        
+
         Ok(result.rows_affected() > 0)
     }
 
     pub async fn peer_exists(&self, asn: u32) -> Result<bool, PeerError> {
-        let (exists,): (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM peers WHERE asn = $1)")
-            .bind(asn as i64)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|source| PeerError::Database { source })?;
+        let (exists,): (bool,) =
+            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM peers WHERE asn = $1)")
+                .bind(asn as i64)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|source| PeerError::Database { source })?;
         Ok(exists)
     }
 }

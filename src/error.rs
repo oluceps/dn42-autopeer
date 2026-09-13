@@ -100,12 +100,18 @@ impl IntoResponse for PeerError {
             PeerError::InvalidWgPubKeyLength { len } => (
                 StatusCode::BAD_REQUEST,
                 "invalid_wg_pubkey_length".to_string(),
-                Some(format!("WireGuard public key length must be 44, got {}", len)),
+                Some(format!(
+                    "WireGuard public key length must be 44, got {}",
+                    len
+                )),
             ),
             PeerError::InvalidWgPubKeyBase64 { source } => (
                 StatusCode::BAD_REQUEST,
                 "invalid_wg_pubkey_base64".to_string(),
-                Some(format!("WireGuard public key must be valid base64: {}", source)),
+                Some(format!(
+                    "WireGuard public key must be valid base64: {}",
+                    source
+                )),
             ),
             PeerError::Validation { detail } => (
                 StatusCode::BAD_REQUEST,
@@ -146,5 +152,3 @@ impl IntoResponse for PeerError {
         (status, Json(ErrorResponse { error, detail })).into_response()
     }
 }
-
-

@@ -1,8 +1,7 @@
-
+use crate::wg_pubkey::WgPubKey;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::{OpenApi, ToSchema};
-use serde::{Deserialize, Serialize};
-use crate::wg_pubkey::WgPubKey;
 
 // ==========================================
 // part 2: api data transfer objects (请求与响应载荷)
@@ -12,12 +11,13 @@ use crate::wg_pubkey::WgPubKey;
 // user sign message with a auth prvkey which on registry.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct Challenge {
-    #[schema(example = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMDcYqby4TnhKV6xGyuZUtxOmTtXjKYp8r+uCxbGph65")]
+    #[schema(
+        example = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMDcYqby4TnhKV6xGyuZUtxOmTtXjKYp8r+uCxbGph65"
+    )]
     auth: String,
     #[schema(example = "-----BEGIN SSH SIGNATURE-----\n...")]
-    signature: String
+    signature: String,
 }
-
 
 /// Payload received from restful POST request to create a peer
 ///
@@ -35,22 +35,18 @@ pub struct CreatePeerReq {
     pub pubkey: WgPubKey,
 
     /// (Optional) Endpoint string formatted as `IP:PORT`.
-    /// 
+    ///
     /// If omitted, the peer is considered floating (useful for dynamic IPs/roaming clients).
     #[schema(example = "198.51.100.1:51820")]
     pub endpoint: Option<String>,
 
     /// Cryptographic challenge payload proving ownership of the registered ASN.
-    pub challenge: Challenge
+    pub challenge: Challenge,
 }
 
-
-
-
 // payload for restful patch/put request
-#[derive(Debug, Deserialize,ToSchema)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdatePeerReq {
-
     // as identity
     #[schema(example = 4242421234u32)]
     pub asn: u32,
@@ -63,15 +59,15 @@ pub struct UpdatePeerReq {
     pub endpoint: Option<String>,
     // // optionally change status to suspend or resume the peer
     // pub status: Option<PeerStatus>,
-    pub challenge: Challenge
+    pub challenge: Challenge,
 }
 
-#[derive(Debug, Deserialize,ToSchema)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct DeletePeerReq {
     #[schema(example = 4242421234u32)]
     pub asn: u32,
 
-    pub challenge: Challenge
+    pub challenge: Challenge,
 }
 
 // root response structure for peering requests
@@ -122,7 +118,6 @@ pub struct BgpConfig {
     pub extended_next_hop: bool,
 }
 
-
 // shared state injected into restful handlers (e.g., via axum state)
 #[derive(Clone)]
 pub struct AppState {
@@ -130,8 +125,8 @@ pub struct AppState {
 }
 
 use axum::{Json, extract::State};
-use std::str::FromStr;
 use std::net::SocketAddr;
+use std::str::FromStr;
 
 use crate::error::{ErrorResponse, PeerError};
 
@@ -153,23 +148,42 @@ pub async fn create_peer(
     Json(payload): Json<CreatePeerReq>,
 ) -> Result<Json<PeerResponse>, PeerError> {
     let expected_msg = crate::challenge::build_expected_message(payload.asn, Some(&payload.pubkey));
-    crate::challenge::authorize_request(payload.asn, &payload.challenge.auth, &payload.challenge.signature, &expected_msg).await?;
+    crate::challenge::authorize_request(
+        payload.asn,
+        &payload.challenge.auth,
+        &payload.challenge.signature,
+        &expected_msg,
+    )
+    .await?;
 
     if state.manager.peer_exists(payload.asn).await? {
         return Err(PeerError::AlreadyExists { asn: payload.asn });
     }
 
-    let endpoint = payload.endpoint.as_deref().map(SocketAddr::from_str).transpose()
-        .map_err(|_| PeerError::Validation { detail: "Invalid endpoint format".to_string() })?;
+    let endpoint = payload
+        .endpoint
+        .as_deref()
+        .map(SocketAddr::from_str)
+        .transpose()
+        .map_err(|_| PeerError::Validation {
+            detail: "Invalid endpoint format".to_string(),
+        })?;
 
-    let peer = state.manager.upsert_peer(payload.asn, payload.pubkey, endpoint).await?;
+    let peer = state
+        .manager
+        .upsert_peer(payload.asn, payload.pubkey, endpoint)
+        .await?;
 
     Ok(Json(PeerResponse {
         status: "success".to_string(),
         message: "Peer successfully configured in BIRD and Kernel.".to_string(),
         wg_config: WgConfig {
             your_assigned_ip: format!("{}/64", peer.remote_ll_ip),
-            my_endpoint: format!("{}:{}", state.manager.public_endpoint, 20000 + (payload.asn % 10000) as u16),
+            my_endpoint: format!(
+                "{}:{}",
+                state.manager.public_endpoint,
+                20000 + (payload.asn % 10000) as u16
+            ),
             my_pubkey: state.manager.local_wg_pubkey.clone(),
             allowed_ips: "0.0.0.0/0, ::/0".to_string(),
         },
@@ -200,23 +214,42 @@ pub async fn update_peer(
     Json(payload): Json<UpdatePeerReq>,
 ) -> Result<Json<PeerResponse>, PeerError> {
     let expected_msg = crate::challenge::build_expected_message(payload.asn, Some(&payload.pubkey));
-    crate::challenge::authorize_request(payload.asn, &payload.challenge.auth, &payload.challenge.signature, &expected_msg).await?;
+    crate::challenge::authorize_request(
+        payload.asn,
+        &payload.challenge.auth,
+        &payload.challenge.signature,
+        &expected_msg,
+    )
+    .await?;
 
     if !state.manager.peer_exists(payload.asn).await? {
         return Err(PeerError::NotFound { asn: payload.asn });
     }
 
-    let endpoint = payload.endpoint.as_deref().map(SocketAddr::from_str).transpose()
-        .map_err(|_| PeerError::Validation { detail: "Invalid endpoint format".to_string() })?;
+    let endpoint = payload
+        .endpoint
+        .as_deref()
+        .map(SocketAddr::from_str)
+        .transpose()
+        .map_err(|_| PeerError::Validation {
+            detail: "Invalid endpoint format".to_string(),
+        })?;
 
-    let peer = state.manager.upsert_peer(payload.asn, payload.pubkey, endpoint).await?;
+    let peer = state
+        .manager
+        .upsert_peer(payload.asn, payload.pubkey, endpoint)
+        .await?;
 
     Ok(Json(PeerResponse {
         status: "success".to_string(),
         message: "Peer successfully updated.".to_string(),
         wg_config: WgConfig {
             your_assigned_ip: format!("{}/64", peer.remote_ll_ip),
-            my_endpoint: format!("{}:{}", state.manager.public_endpoint, 20000 + (payload.asn % 10000) as u16),
+            my_endpoint: format!(
+                "{}:{}",
+                state.manager.public_endpoint,
+                20000 + (payload.asn % 10000) as u16
+            ),
             my_pubkey: state.manager.local_wg_pubkey.clone(),
             allowed_ips: "0.0.0.0/0, ::/0".to_string(),
         },
@@ -247,7 +280,13 @@ pub async fn delete_peer(
     Json(payload): Json<DeletePeerReq>,
 ) -> Result<Json<PeerResponse>, PeerError> {
     let expected_msg = crate::challenge::build_expected_message(payload.asn, None);
-    crate::challenge::authorize_request(payload.asn, &payload.challenge.auth, &payload.challenge.signature, &expected_msg).await?;
+    crate::challenge::authorize_request(
+        payload.asn,
+        &payload.challenge.auth,
+        &payload.challenge.signature,
+        &expected_msg,
+    )
+    .await?;
 
     state.manager.delete_peer(payload.asn).await?;
 
@@ -269,9 +308,6 @@ pub async fn delete_peer(
     }))
 }
 
-
-
-
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -280,13 +316,16 @@ pub async fn delete_peer(
         version = "1.0.0",
         contact(name = "DN42 Admin")
     ),
-    paths(
-        create_peer,
-        update_peer,
-        delete_peer
-    ),
-    components(
-        schemas(CreatePeerReq, UpdatePeerReq, DeletePeerReq, Challenge, PeerResponse, WgConfig, BgpConfig, ErrorResponse)
-    )
+    paths(create_peer, update_peer, delete_peer),
+    components(schemas(
+        CreatePeerReq,
+        UpdatePeerReq,
+        DeletePeerReq,
+        Challenge,
+        PeerResponse,
+        WgConfig,
+        BgpConfig,
+        ErrorResponse
+    ))
 )]
 pub struct ApiDoc;

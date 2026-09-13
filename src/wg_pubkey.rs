@@ -1,8 +1,8 @@
-use std::fmt;
-use serde::{Deserialize, Serialize};
+use crate::error::{InvalidWgPubKeyBase64Snafu, InvalidWgPubKeyLengthSnafu, PeerError};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use crate::error::{PeerError, InvalidWgPubKeyLengthSnafu, InvalidWgPubKeyBase64Snafu};
+use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -15,7 +15,9 @@ impl TryFrom<String> for WgPubKey {
         if value.len() != 44 {
             return InvalidWgPubKeyLengthSnafu { len: value.len() }.fail();
         }
-        STANDARD.decode(&value).context(InvalidWgPubKeyBase64Snafu)?;
+        STANDARD
+            .decode(&value)
+            .context(InvalidWgPubKeyBase64Snafu)?;
         Ok(Self(value))
     }
 }

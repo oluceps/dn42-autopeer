@@ -1,9 +1,9 @@
 use crate::error::PeerError;
 use crate::wg_pubkey::WgPubKey;
-use ssh_key::{PublicKey, SshSig};
-use std::str::FromStr;
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
 use pgp::types::KeyDetails;
+use ssh_key::{PublicKey, SshSig};
+use std::str::FromStr;
 
 #[allow(dead_code)]
 pub fn verify_signature(
@@ -92,11 +92,12 @@ async fn check_registry_for_asn_and_pubkey(
 
     let mut expected_auth_strings = vec![expected_pubkey.trim().to_string()];
     if expected_pubkey.contains("BEGIN PGP PUBLIC KEY BLOCK")
-        && let Ok((pubkey, _)) = SignedPublicKey::from_string(expected_pubkey) {
-            let fpr = pubkey.fingerprint();
-            let fpr_hex = hex::encode(fpr.as_bytes()).to_uppercase();
-            expected_auth_strings.push(format!("pgp-fingerprint {}", fpr_hex));
-        }
+        && let Ok((pubkey, _)) = SignedPublicKey::from_string(expected_pubkey)
+    {
+        let fpr = pubkey.fingerprint();
+        let fpr_hex = hex::encode(fpr.as_bytes()).to_uppercase();
+        expected_auth_strings.push(format!("pgp-fingerprint {}", fpr_hex));
+    }
 
     // 1. Get aut-num object
     let asn_url = format!("{}/aut-num/AS{}", registry_url, asn);
@@ -158,7 +159,10 @@ async fn check_registry_for_asn_and_pubkey(
                             // Because public_key_str contains "ssh-ed25519 AAAA...", an exact string match is usually correct
                             // For PGP, we check if it matches the pgp-fingerprint
                             let auth_trim = auth_val.trim();
-                            if expected_auth_strings.iter().any(|s| s.as_str() == auth_trim) {
+                            if expected_auth_strings
+                                .iter()
+                                .any(|s| s.as_str() == auth_trim)
+                            {
                                 return Ok(true);
                             }
                         }
