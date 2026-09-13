@@ -149,6 +149,30 @@ impl IntoResponse for PeerError {
                 None,
             ),
         };
-        (status, Json(ErrorResponse { error, detail })).into_response()
+        (status, axum::Json(ErrorResponse { error, detail })).into_response()
+    }
+}
+
+#[allow(dead_code)]
+pub struct AppJson<T>(pub T);
+
+impl<T, S> axum::extract::FromRequest<S> for AppJson<T>
+where
+    axum::Json<T>: axum::extract::FromRequest<S, Rejection = axum::extract::rejection::JsonRejection>,
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, Json<ErrorResponse>);
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(value) => Ok(AppJson(value.0)),
+            Err(rejection) => {
+                let err_res = ErrorResponse {
+                    error: "json_parse_error".to_string(),
+                    detail: Some(rejection.body_text()),
+                };
+                Err((rejection.status(), Json(err_res)))
+            }
+        }
     }
 }

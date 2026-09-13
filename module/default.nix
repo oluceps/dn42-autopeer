@@ -87,9 +87,7 @@ in
         # NET_ADMIN is exactly what is needed for netlink (adding/removing WG interfaces)
         AmbientCapabilities = [ "CAP_NET_ADMIN" ];
         CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
-
-        # Ensures that the configuration directory exists before starting
-        StateDirectory = "autopeer";
+        ReadWritePaths = [ "/var/lib/autopeer" ];
       };
     };
   };

@@ -1,19 +1,16 @@
+use std::{path::Path, net::{Ipv6Addr, SocketAddr}};
+use snafu::ResultExt;
+use tokio::net::UnixStream;
+use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
 use crate::{
-    error::{BirdConfigIoSnafu, PeerError},
-    netlink::WgManager,
     peer::{Peer, PeerStatus},
     persist::PeerStore,
-    template::PeerTemplate,
     wg_pubkey::WgPubKey,
+    error::{PeerError, BirdConfigIoSnafu},
+    netlink::WgManager,
+    template::PeerTemplate,
 };
 use askama::Template;
-use snafu::ResultExt;
-use std::{
-    net::{Ipv6Addr, SocketAddr},
-    path::Path,
-};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 pub struct PeerManager {
     db: PeerStore,
@@ -26,24 +23,8 @@ pub struct PeerManager {
 }
 
 impl PeerManager {
-    pub fn new(
-        db: PeerStore,
-        bird_conf_dir: String,
-        bird_socket: String,
-        local_wg_privkey: String,
-        local_wg_pubkey: String,
-        public_endpoint: String,
-        local_asn: u32,
-    ) -> Self {
-        Self {
-            db,
-            bird_conf_dir,
-            bird_socket,
-            local_wg_privkey,
-            local_wg_pubkey,
-            public_endpoint,
-            local_asn,
-        }
+    pub fn new(db: PeerStore, bird_conf_dir: String, bird_socket: String, local_wg_privkey: String, local_wg_pubkey: String, public_endpoint: String, local_asn: u32) -> Self {
+        Self { db, bird_conf_dir, bird_socket, local_wg_privkey, local_wg_pubkey, public_endpoint, local_asn }
     }
 
     pub async fn peer_exists(&self, asn: u32) -> Result<bool, PeerError> {
@@ -61,26 +42,8 @@ impl PeerManager {
 
         // Generate deterministic LL IPs
         // e.g., fe80::local_asn and fe80::remote_asn
-        let local_ll_ip = Ipv6Addr::new(
-            0xfe80,
-            0,
-            0,
-            0,
-            0,
-            0,
-            (self.local_asn >> 16) as u16,
-            (self.local_asn & 0xFFFF) as u16,
-        );
-        let remote_ll_ip = Ipv6Addr::new(
-            0xfe80,
-            0,
-            0,
-            0,
-            0,
-            0,
-            (asn >> 16) as u16,
-            (asn & 0xFFFF) as u16,
-        );
+        let local_ll_ip = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, (self.local_asn >> 16) as u16, (self.local_asn & 0xFFFF) as u16);
+        let remote_ll_ip = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, (asn >> 16) as u16, (asn & 0xFFFF) as u16);
 
         let peer = Peer {
             iface_name: iface_name.clone(),
@@ -92,23 +55,14 @@ impl PeerManager {
             status: PeerStatus::Active,
         };
 
-        // 1. Store in DB
-        self.db.insert_peer(&peer, listen_port).await?;
-
-        // 2. Configure WireGuard Interface
+        // 1. Configure WireGuard Interface
         if let Err(e) = WgManager::ensure_wg_interface(&iface_name).await {
             if cfg!(debug_assertions) {
                 eprintln!("DEBUG: Skipping netlink WG creation due to error: {:?}", e);
             } else {
                 return Err(e);
             }
-        } else if let Err(e) = WgManager::configure_peer(
-            &iface_name,
-            &self.local_wg_privkey,
-            listen_port,
-            &pubkey,
-            endpoint,
-        ) {
+        } else if let Err(e) = WgManager::configure_peer(&iface_name, &self.local_wg_privkey, listen_port, &pubkey, endpoint) {
             if cfg!(debug_assertions) {
                 eprintln!("DEBUG: Skipping WG config due to error: {:?}", e);
             } else {
@@ -125,11 +79,42 @@ impl PeerManager {
             remote_ll_ip,
         };
         let bird_conf_content = bird_template.render().unwrap();
-
+        
         let conf_path = Path::new(&self.bird_conf_dir).join(format!("{}.conf", iface_name));
-        tokio::fs::write(&conf_path, bird_conf_content)
+        
+        let parent_mode = tokio::fs::metadata(&self.bird_conf_dir)
             .await
-            .context(BirdConfigIoSnafu { path: conf_path })?;
+            .map(|m| {
+                use std::os::unix::fs::PermissionsExt;
+                m.permissions().mode() & 0o666
+            })
+            .unwrap_or(0o644);
+
+        let mut open_opts = tokio::fs::OpenOptions::new();
+        open_opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            open_opts.mode(parent_mode);
+        }
+
+        let mut file = open_opts
+            .open(&conf_path)
+            .await
+            .context(BirdConfigIoSnafu { path: conf_path.clone() })?;
+            
+        file.write_all(bird_conf_content.as_bytes())
+            .await
+            .context(BirdConfigIoSnafu { path: conf_path.clone() })?;
+
+        // Explicitly set permissions to bypass process umask (e.g. 022)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(parent_mode);
+            file.set_permissions(perms)
+                .await
+                .context(BirdConfigIoSnafu { path: conf_path.clone() })?;
+        }
 
         // 4. Reload BIRD
         if let Err(e) = self.reload_bird().await {
@@ -139,6 +124,8 @@ impl PeerManager {
                 return Err(e);
             }
         }
+        // 4. Store in DB (Only after system state has successfully applied)
+        self.db.insert_peer(&peer, listen_port).await?;
 
         Ok(peer)
     }
@@ -146,34 +133,24 @@ impl PeerManager {
     pub async fn delete_peer(&self, asn: u32) -> Result<(), PeerError> {
         let iface_name = format!("wg{}", asn);
         let conf_path = Path::new(&self.bird_conf_dir).join(format!("{}.conf", iface_name));
-
-        // Remove BIRD conf
-        if conf_path.exists() {
-            tokio::fs::remove_file(&conf_path).await.ok();
-            if let Err(e) = self.reload_bird().await {
-                if cfg!(debug_assertions) {
-                    eprintln!(
-                        "DEBUG: Skipping BIRD reload on delete due to error: {:?}",
-                        e
-                    );
-                } else {
-                    return Err(e);
-                }
+        
+        // 1. Remove BIRD conf
+        tokio::fs::remove_file(&conf_path).await.ok();
+        
+        // 2. Reload BIRD
+        if let Err(e) = self.reload_bird().await {
+            if cfg!(debug_assertions) {
+                eprintln!("DEBUG: Skipping BIRD reload on delete due to error: {:?}", e);
+            } else {
+                return Err(e);
             }
         }
 
-        // We can optionally delete the WG interface via netlink here
-        // rtnetlink's LinkDelRequest...
-        // For now just deleting BIRD config removes BGP session.
-        // Actually, deleting the wireguard interface is important to prevent orphan interfaces.
+        // 3. Remove WG Interface
         let (connection, handle, _) = rtnetlink::new_connection().unwrap();
         tokio::spawn(connection);
-
-        let mut links = handle
-            .link()
-            .get()
-            .match_name(iface_name.to_string())
-            .execute();
+        
+        let mut links = handle.link().get().match_name(iface_name.to_string()).execute();
         use futures::StreamExt;
         if let Some(Ok(link)) = links.next().await {
             handle.link().del(link.header.index).execute().await.ok();
@@ -189,60 +166,58 @@ impl PeerManager {
     }
 
     async fn reload_bird(&self) -> Result<(), PeerError> {
-        let mut stream =
-            UnixStream::connect(&self.bird_socket)
-                .await
-                .map_err(|e| PeerError::BirdConfigIo {
-                    source: e,
-                    path: std::path::PathBuf::from(&self.bird_socket),
-                })?;
+        let mut stream = UnixStream::connect(&self.bird_socket).await
+            .map_err(|e| PeerError::BirdConfigIo { source: e, path: std::path::PathBuf::from(&self.bird_socket) })?;
 
         let (read_half, mut write_half) = stream.split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
+        let mut line = Vec::new();
 
         // 1. Read the welcome banner
         loop {
             line.clear();
-            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
-                return Err(PeerError::BirdReload {
-                    stderr: "BIRD socket closed early".to_string(),
-                });
+            if reader.read_until(b'\n', &mut line).await.unwrap_or(0) == 0 {
+                return Err(PeerError::BirdReload { stderr: "BIRD socket closed early".to_string() });
             }
-            if line.len() >= 5 && line.as_bytes()[4] == b' ' {
+            if line.len() >= 5 && line[4] == b' ' {
                 break;
             }
         }
 
         // 2. Send configure soft
-        write_half
-            .write_all(b"configure soft\n")
-            .await
-            .map_err(|e| PeerError::BirdConfigIo {
-                source: e,
-                path: std::path::PathBuf::from(&self.bird_socket),
-            })?;
+        write_half.write_all(b"configure soft\n").await
+            .map_err(|e| PeerError::BirdConfigIo { source: e, path: std::path::PathBuf::from(&self.bird_socket) })?;
 
         // 3. Read the response
         let mut response_output = String::new();
         let mut success = false;
         loop {
             line.clear();
-            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
-                break;
+            let n = reader.read_until(b'\n', &mut line).await.map_err(|e| PeerError::BirdReload { 
+                stderr: format!("Socket read error: {}. Output so far: {}", e, response_output) 
+            })?;
+            
+            if n == 0 {
+                return Err(PeerError::BirdReload { 
+                    stderr: format!("BIRD closed socket unexpectedly. Output so far: {}", response_output.trim()) 
+                });
             }
-            response_output.push_str(&line);
-            if line.len() >= 5 && line.as_bytes()[4] == b' ' {
+            
+            let line_str = String::from_utf8_lossy(&line);
+            response_output.push_str(&line_str);
+            if line.len() >= 5 && line[4] == b' ' {
                 let code = &line[0..4];
-                success = !(code.starts_with('8') || code.starts_with('9'));
+                if code.starts_with(b"8") || code.starts_with(b"9") {
+                    success = false;
+                } else {
+                    success = true;
+                }
                 break;
             }
         }
 
         if !success {
-            return Err(PeerError::BirdReload {
-                stderr: response_output.trim().to_string(),
-            });
+            return Err(PeerError::BirdReload { stderr: response_output.trim().to_string() });
         }
         Ok(())
     }
@@ -251,32 +226,22 @@ impl PeerManager {
 impl Drop for PeerManager {
     fn drop(&mut self) {
         println!("PeerManager dropping: cleaning up BIRD configs and reloading...");
-
+        
         // 1. Clean up the configuration directory
         // We attempt to remove the directory and recreate it to wipe all generated configs
         if std::fs::remove_dir_all(&self.bird_conf_dir).is_ok() {
             std::fs::create_dir_all(&self.bird_conf_dir).ok();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = std::fs::metadata(&self.bird_conf_dir) {
-                    let mut perms = metadata.permissions();
-                    perms.set_mode(0o755);
-                    let _ = std::fs::set_permissions(&self.bird_conf_dir, perms);
-                }
-            }
         }
 
         // 2. Soft reload BIRD synchronously to apply the clean state
         let _ = std::process::Command::new("birdc")
             .args(["configure", "soft"])
             .output();
-
+            
         println!("Cleanup complete.");
     }
 }
 
-/*
 #[cfg(test)]
 mod tests {
 
@@ -289,7 +254,7 @@ mod tests {
     #[ignore = "Requires BIRD socket permissions locally"]
     async fn test_bird_socket_protocol() {
         let bird_socket = std::env::var("BIRD_SOCKET").unwrap_or_else(|_| "/run/bird/bird.ctl".to_string());
-
+        
         let mut stream = match UnixStream::connect(&bird_socket).await {
             Ok(s) => s,
             Err(e) => {
@@ -342,8 +307,7 @@ mod tests {
 
         println!("Final success status: {}", success);
         println!("Full captured output:\n{}", response_output);
-
+        
         assert!(success || !response_output.is_empty(), "Either it succeeds or returns an error message");
     }
 }
-*/

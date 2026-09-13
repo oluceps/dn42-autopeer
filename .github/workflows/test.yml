@@ -20,16 +20,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install just
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just
+      - name: Install System Dependencies (Nushell & Just & Mold)
+        run: |
+          sudo apt-get update && sudo apt-get install -y mold
 
-      - name: Install mise and nushell
-        uses: jdx/mise-action@v2
-        with:
-          tool_versions: |
-            nushell latest
+          # Install just
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+          
+          # Install nushell
+          curl -LSfs https://jdx.dev/mise/install.sh | sh
+          ~/.local/bin/mise use -g nushell@latest
+          echo "~/.local/share/mise/installs/nushell/latest/bin" >> $GITHUB_PATH
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -38,8 +39,6 @@ jobs:
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "v2-cache-bust-1"
 
       - name: Check formatting
         run: cargo fmt -- --check
