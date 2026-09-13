@@ -23,7 +23,7 @@ jobs:
       - name: Install System Dependencies (Nushell & Just)
         uses: taiki-e/install-action@v2
         with:
-          tool: just,nushell
+          tool: just,nu
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
