@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use serde::Serialize;
 use snafu::prelude::*;
 use std::net::AddrParseError;

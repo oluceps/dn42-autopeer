@@ -17,13 +17,11 @@ impl PeerStore {
         // WORKAROUND: sqlx 0.9.0 retains brackets for IPv6 literals in PgConnectOptions
         // which causes `getaddrinfo` to fail with "Name or service not known".
         // We use the url crate to extract the host and strip the brackets manually.
-        if let Ok(parsed_url) = url::Url::parse(&db_url) {
-            if let Some(host) = parsed_url.host_str() {
-                if host.starts_with('[') && host.ends_with(']') {
+        if let Ok(parsed_url) = url::Url::parse(&db_url)
+            && let Some(host) = parsed_url.host_str()
+                && host.starts_with('[') && host.ends_with(']') {
                     opts = opts.host(&host[1..host.len()-1]);
                 }
-            }
-        }
 
         let pool = PgPoolOptions::new()
             .max_connections(5)

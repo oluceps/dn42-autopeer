@@ -91,13 +91,12 @@ async fn check_registry_for_asn_and_pubkey(
         .unwrap_or_else(|_| "https://explorer.burble.com/api/registry".to_string());
 
     let mut expected_auth_strings = vec![expected_pubkey.trim().to_string()];
-    if expected_pubkey.contains("BEGIN PGP PUBLIC KEY BLOCK") {
-        if let Ok((pubkey, _)) = SignedPublicKey::from_string(expected_pubkey) {
+    if expected_pubkey.contains("BEGIN PGP PUBLIC KEY BLOCK")
+        && let Ok((pubkey, _)) = SignedPublicKey::from_string(expected_pubkey) {
             let fpr = pubkey.fingerprint();
             let fpr_hex = hex::encode(fpr.as_bytes()).to_uppercase();
             expected_auth_strings.push(format!("pgp-fingerprint {}", fpr_hex));
         }
-    }
 
     // 1. Get aut-num object
     let asn_url = format!("{}/aut-num/AS{}", registry_url, asn);
