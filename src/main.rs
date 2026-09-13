@@ -32,6 +32,15 @@ async fn main() {
 
     // Ensure the config directory exists
     std::fs::create_dir_all(&bird_conf_dir).ok();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(&bird_conf_dir) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(&bird_conf_dir, perms);
+        }
+    }
 
     println!("Using Database: {}", db_url);
     println!("Using BIRD config dir: {}", bird_conf_dir);

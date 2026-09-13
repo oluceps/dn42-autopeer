@@ -256,6 +256,15 @@ impl Drop for PeerManager {
         // We attempt to remove the directory and recreate it to wipe all generated configs
         if std::fs::remove_dir_all(&self.bird_conf_dir).is_ok() {
             std::fs::create_dir_all(&self.bird_conf_dir).ok();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = std::fs::metadata(&self.bird_conf_dir) {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(0o755);
+                    let _ = std::fs::set_permissions(&self.bird_conf_dir, perms);
+                }
+            }
         }
 
         // 2. Soft reload BIRD synchronously to apply the clean state

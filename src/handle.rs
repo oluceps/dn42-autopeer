@@ -79,9 +79,11 @@ pub struct PeerResponse {
     #[schema(example = "Peer successfully configured in BIRD and Kernel.")]
     pub message: String,
 
-    pub wg_config: WgConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wg_config: Option<WgConfig>,
 
-    pub bgp_config: BgpConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bgp_config: Option<BgpConfig>,
 }
 
 // wireguard layer configuration details for the user
@@ -177,7 +179,7 @@ pub async fn create_peer(
     Ok(Json(PeerResponse {
         status: "success".to_string(),
         message: "Peer successfully configured in BIRD and Kernel.".to_string(),
-        wg_config: WgConfig {
+        wg_config: Some(WgConfig {
             your_assigned_ip: format!("{}/64", peer.remote_ll_ip),
             my_endpoint: format!(
                 "{}:{}",
@@ -186,13 +188,13 @@ pub async fn create_peer(
             ),
             my_pubkey: state.manager.local_wg_pubkey.clone(),
             allowed_ips: "0.0.0.0/0, ::/0".to_string(),
-        },
-        bgp_config: BgpConfig {
+        }),
+        bgp_config: Some(BgpConfig {
             my_asn: state.manager.local_asn,
             my_neighbor_ip: peer.local_ll_ip.to_string(),
             multiprotocol: true,
             extended_next_hop: true,
-        },
+        }),
     }))
 }
 
@@ -235,7 +237,7 @@ pub async fn update_peer(
             detail: "Invalid endpoint format".to_string(),
         })?;
 
-    let peer = state
+    let _peer = state
         .manager
         .upsert_peer(payload.asn, payload.pubkey, endpoint)
         .await?;
@@ -243,22 +245,8 @@ pub async fn update_peer(
     Ok(Json(PeerResponse {
         status: "success".to_string(),
         message: "Peer successfully updated.".to_string(),
-        wg_config: WgConfig {
-            your_assigned_ip: format!("{}/64", peer.remote_ll_ip),
-            my_endpoint: format!(
-                "{}:{}",
-                state.manager.public_endpoint,
-                20000 + (payload.asn % 10000) as u16
-            ),
-            my_pubkey: state.manager.local_wg_pubkey.clone(),
-            allowed_ips: "0.0.0.0/0, ::/0".to_string(),
-        },
-        bgp_config: BgpConfig {
-            my_asn: state.manager.local_asn,
-            my_neighbor_ip: peer.local_ll_ip.to_string(),
-            multiprotocol: true,
-            extended_next_hop: true,
-        },
+        wg_config: None,
+        bgp_config: None,
     }))
 }
 
@@ -293,18 +281,8 @@ pub async fn delete_peer(
     Ok(Json(PeerResponse {
         status: "success".to_string(),
         message: "Peer successfully removed.".to_string(),
-        wg_config: WgConfig {
-            your_assigned_ip: "".to_string(),
-            my_endpoint: "".to_string(),
-            my_pubkey: "".to_string(),
-            allowed_ips: "".to_string(),
-        },
-        bgp_config: BgpConfig {
-            my_asn: 0,
-            my_neighbor_ip: "".to_string(),
-            multiprotocol: false,
-            extended_next_hop: false,
-        },
+        wg_config: None,
+        bgp_config: None,
     }))
 }
 
