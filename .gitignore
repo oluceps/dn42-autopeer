@@ -6,3 +6,4 @@ book
 /.pre-commit-config.yaml
 /vendor
 /tests
+/.agents
