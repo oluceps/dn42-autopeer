@@ -20,10 +20,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install System Dependencies (Nushell & Just)
+      - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just,nu
+          tool: just
+
+      - name: Install mise and nushell
+        uses: jdx/mise-action@v2
+        with:
+          install: false
+          
+      - name: Setup nushell via mise
+        run: mise use -g nushell@latest
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
