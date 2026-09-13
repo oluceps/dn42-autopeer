@@ -2198,6 +2198,7 @@ dependencies = [
  "sqlx",
  "ssh-key",
  "tokio",
+ "url",
  "utoipa",
  "utoipa-swagger-ui",
  "wireguard-control",

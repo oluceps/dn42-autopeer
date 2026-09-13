@@ -60,9 +60,10 @@ in
       description = "DN42 Autopeer Web Server";
       after = [
         "network.target"
-        "postgresql.service"
       ];
       wantedBy = [ "multi-user.target" ];
+
+      path = [ pkgs.bird3 ];
 
       environment = {
         PORT = toString cfg.port;
@@ -73,27 +74,25 @@ in
       };
 
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/nyaw-dn42-autopeer";
+        ExecStart = "${cfg.package}/bin/dn42-autopeer";
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
 
         Type = "simple";
         Restart = "on-failure";
         RestartSec = "5s";
 
-        # The service manipulates netlink interfaces (requires CAP_NET_ADMIN)
-        # and talks to BIRD control socket (requires root or bird group).
-        # Running as root is standard for network managing daemons in DN42.
-        User = "root";
+        # Security Hardening
+        DynamicUser = true;
+        # Need to be in the same group as BIRD to access its control socket (/run/bird/bird.ctl)
+        SupplementaryGroups = [ "bird" ];
+
+        # NET_ADMIN is exactly what is needed for netlink (adding/removing WG interfaces)
+        AmbientCapabilities = [ "CAP_NET_ADMIN" ];
+        CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
 
         # Ensures that the configuration directory exists before starting
         StateDirectory = "autopeer";
       };
     };
-
-    # Ensure the BIRD config directory exists
-    system.activationScripts.autopeer = ''
-      mkdir -p ${cfg.birdConfDir}
-      chmod 755 ${cfg.birdConfDir}
-    '';
   };
 }

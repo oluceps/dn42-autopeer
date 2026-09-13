@@ -1,5 +1,6 @@
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::env;
+use std::str::FromStr;
 use crate::{peer::{Peer, PeerStatus}, error::PeerError};
 
 pub struct PeerStore {
@@ -10,9 +11,23 @@ impl PeerStore {
     pub async fn new() -> Result<Self, PeerError> {
         let db_url = env::var("DATABASE_URL").unwrap_or_else(|_| "postgres://dn42-bot@localhost/dn42".to_string());
         
+        let mut opts = sqlx::postgres::PgConnectOptions::from_str(&db_url)
+            .map_err(|source| PeerError::Database { source })?;
+
+        // WORKAROUND: sqlx 0.9.0 retains brackets for IPv6 literals in PgConnectOptions
+        // which causes `getaddrinfo` to fail with "Name or service not known".
+        // We use the url crate to extract the host and strip the brackets manually.
+        if let Ok(parsed_url) = url::Url::parse(&db_url) {
+            if let Some(host) = parsed_url.host_str() {
+                if host.starts_with('[') && host.ends_with(']') {
+                    opts = opts.host(&host[1..host.len()-1]);
+                }
+            }
+        }
+
         let pool = PgPoolOptions::new()
             .max_connections(5)
-            .connect(&db_url)
+            .connect_with(opts)
             .await
             .map_err(|source| PeerError::Database { source })?;
 
