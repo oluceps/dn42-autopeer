@@ -12,6 +12,28 @@ It uses PostgreSQL as the durable source of peer state.
 - PostgreSQL stores desired peer state, operation state, listen ports, and authentication nonces.
 - `utoipa` publishes OpenAPI documentation through Swagger UI.
 
+## Agent-native peering
+
+Install the bundled [`nyaw-dn42-autopeer` skill](skills/nyaw-dn42-autopeer/SKILL.md) from GitHub:
+
+```bash
+npx skills add oluceps/dn42-autopeer
+```
+
+Select your coding agent and installation scope when the CLI asks.
+The skill reads the live [OpenAPI specification](https://dn42.nyaw.xyz/api-docs/openapi.json), gets a single-use challenge, and prepares the signed request.
+Supply your ASN, public endpoint, and the path to a registered maintainer signing key.
+The agent can generate a WireGuard key pair locally and return the exact WireGuard and BGP settings from the API.
+Private keys stay on your system.
+
+Example prompt:
+
+```text
+Use $nyaw-dn42-autopeer to peer AS4242421234 with Nyaw.
+My endpoint is 198.51.100.1:51820, and my registered SSH key is ~/.ssh/id_ed25519.
+Save the new WireGuard key pair under ./secrets/nyaw-peer/.
+```
+
 ## Authentication
 
 Each mutation needs a short-lived, single-use challenge.

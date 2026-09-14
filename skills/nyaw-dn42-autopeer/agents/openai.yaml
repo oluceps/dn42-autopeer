@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nyaw DN42 Autopeer"
+  short_description: "Manage DN42 peering with the Nyaw API"
+  default_prompt: "Use $nyaw-dn42-autopeer to create my DN42 peer with Nyaw."

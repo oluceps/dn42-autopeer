@@ -8,3 +8,6 @@ book
 /tests
 /.agents
 /skills*
+!/skills/
+!/skills/nyaw-dn42-autopeer/
+!/skills/nyaw-dn42-autopeer/**
