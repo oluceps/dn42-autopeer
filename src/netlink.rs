@@ -11,6 +11,11 @@ pub struct WgManager;
 
 impl WgManager {
     pub async fn ensure_wg_interface(iface_name: &str) -> Result<(), PeerError> {
+        #[cfg(debug_assertions)]
+        if std::env::var("MOCK_NETLINK").is_ok() {
+            return Ok(());
+        }
+
         let (connection, handle, _) = new_connection()
             .map_err(std::io::Error::other)
             .context(NetlinkSnafu { iface_name })?;
@@ -75,6 +80,11 @@ impl WgManager {
         iface_name: &str,
         address: Ipv6Addr,
     ) -> Result<(), PeerError> {
+        #[cfg(debug_assertions)]
+        if std::env::var("MOCK_NETLINK").is_ok() {
+            return Ok(());
+        }
+
         let (connection, handle, _) = new_connection()
             .map_err(std::io::Error::other)
             .context(NetlinkSnafu { iface_name })?;
@@ -114,6 +124,11 @@ impl WgManager {
         peer_pubkey: &WgPubKey,
         endpoint: Option<SocketAddr>,
     ) -> Result<(), PeerError> {
+        #[cfg(debug_assertions)]
+        if std::env::var("MOCK_NETLINK").is_ok() {
+            return Ok(());
+        }
+
         let priv_key = Key::from_base64(private_key).map_err(|_| PeerError::Validation {
             detail: "The local WireGuard private key is invalid".to_string(),
         })?;
@@ -145,6 +160,11 @@ impl WgManager {
     }
 
     pub fn listen_port_in_use(port: u16, except_iface: Option<&str>) -> Result<bool, PeerError> {
+        #[cfg(debug_assertions)]
+        if std::env::var("MOCK_NETLINK").is_ok() {
+            return Ok(false);
+        }
+
         for interface_name in Device::list(Backend::Kernel).context(NetlinkSnafu {
             iface_name: "all WireGuard interfaces",
         })? {
@@ -162,6 +182,11 @@ impl WgManager {
     }
 
     pub async fn delete_interface(iface_name: &str) -> Result<(), PeerError> {
+        #[cfg(debug_assertions)]
+        if std::env::var("MOCK_NETLINK").is_ok() {
+            return Ok(());
+        }
+
         let (connection, handle, _) = new_connection()
             .map_err(std::io::Error::other)
             .context(NetlinkSnafu { iface_name })?;

@@ -359,6 +359,11 @@ impl PeerManager {
     }
 
     async fn reload_bird(&self) -> Result<(), PeerError> {
+        #[cfg(debug_assertions)]
+        if std::env::var("MOCK_BIRD").is_ok() {
+            return Ok(());
+        }
+
         let mut stream = UnixStream::connect(&self.bird_socket)
             .await
             .map_err(|source| PeerError::BirdConfigIo {

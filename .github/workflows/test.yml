@@ -52,4 +52,7 @@ jobs:
         run: cargo test --verbose
 
       - name: Run Containerized API Integration Tests
-        run: just test
+        run: |
+          sudo modprobe wireguard || echo "modprobe failed"
+          lsmod | grep wireguard || echo "wireguard module not loaded"
+          just test
