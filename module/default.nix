@@ -34,6 +34,7 @@ in
         It should contain the following variables:
         - DATABASE_URL=postgres://user:pass@host/db
         - WG_PRIVATE_KEY=your_wireguard_private_key
+        - WG_PUBLIC_KEY=the_matching_wireguard_public_key
       '';
     };
 

@@ -1,183 +1,305 @@
-use crate::error::PeerError;
-use crate::wg_pubkey::WgPubKey;
+use crate::{error::PeerError, persist::PeerStore, wg_pubkey::WgPubKey};
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
 use pgp::types::KeyDetails;
 use ssh_key::{PublicKey, SshSig};
-use std::str::FromStr;
+use std::{net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
+use wireguard_control::Key;
 
-#[allow(dead_code)]
+const CHALLENGE_TTL_SECS: i64 = 300;
+
+#[derive(Clone)]
+pub struct RequestAuthorizer {
+    store: PeerStore,
+    client: reqwest::Client,
+    registry_url: String,
+    registry_limit: Arc<Semaphore>,
+    registry_timeout: Duration,
+}
+
+impl RequestAuthorizer {
+    pub fn new(store: PeerStore) -> Result<Self, PeerError> {
+        let timeout_secs = env_u64("REGISTRY_TIMEOUT_SECS", 10)?;
+        let max_concurrent = env_usize("REGISTRY_MAX_CONCURRENT", 16)?;
+        if timeout_secs == 0 {
+            return Err(PeerError::Validation {
+                detail: "REGISTRY_TIMEOUT_SECS must be greater than zero".to_string(),
+            });
+        }
+        if max_concurrent == 0 {
+            return Err(PeerError::Validation {
+                detail: "REGISTRY_MAX_CONCURRENT must be greater than zero".to_string(),
+            });
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(timeout_secs.min(5)))
+            .read_timeout(Duration::from_secs(timeout_secs))
+            .timeout(Duration::from_secs(timeout_secs))
+            .build()
+            .map_err(|error| PeerError::Validation {
+                detail: format!("Failed to create the registry client: {error}"),
+            })?;
+        Ok(Self {
+            store,
+            client,
+            registry_url: std::env::var("REGISTRY_API_URL")
+                .unwrap_or_else(|_| "https://explorer.burble.com/api/registry".to_string()),
+            registry_limit: Arc::new(Semaphore::new(max_concurrent)),
+            registry_timeout: Duration::from_secs(timeout_secs),
+        })
+    }
+
+    pub async fn issue_challenge(&self, asn: u32) -> Result<(String, i64), PeerError> {
+        let expires_at = unix_timestamp() + CHALLENGE_TTL_SECS;
+        for _ in 0..4 {
+            let nonce = Key::generate_preshared().to_base64();
+            if self.store.insert_nonce(asn, &nonce, expires_at).await? {
+                return Ok((nonce, expires_at));
+            }
+        }
+        Err(PeerError::UnauthorizedChallenge {
+            detail: "The server could not allocate a unique nonce".to_string(),
+        })
+    }
+
+    pub async fn authorize_request(
+        &self,
+        asn: u32,
+        public_key: &str,
+        signature: &str,
+        nonce: &str,
+        expires_at: i64,
+        expected_message: &str,
+    ) -> Result<(), PeerError> {
+        if expires_at < unix_timestamp() {
+            return Err(PeerError::UnauthorizedChallenge {
+                detail: "The challenge expired".to_string(),
+            });
+        }
+
+        verify_signature(public_key, signature, expected_message)?;
+        let _permit =
+            self.registry_limit
+                .try_acquire()
+                .map_err(|_| PeerError::RegistryUnavailable {
+                    detail: "Too many registry checks are active".to_string(),
+                })?;
+        if !self.store.consume_nonce(asn, nonce, expires_at).await? {
+            return Err(PeerError::UnauthorizedChallenge {
+                detail: "The challenge is expired, unknown, or already used".to_string(),
+            });
+        }
+        let is_authorized = tokio::time::timeout(
+            self.registry_timeout,
+            self.check_registry_for_asn_and_pubkey(asn, public_key),
+        )
+        .await
+        .map_err(|_| PeerError::RegistryUnavailable {
+            detail: "The registry check timed out".to_string(),
+        })?
+        .map_err(|_| PeerError::RegistryUnavailable {
+            detail: "The registry request failed".to_string(),
+        })?;
+        if !is_authorized {
+            return Err(PeerError::RegistryMismatch);
+        }
+        Ok(())
+    }
+
+    async fn check_registry_for_asn_and_pubkey(
+        &self,
+        asn: u32,
+        expected_pubkey: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let mut expected_auth_strings = vec![expected_pubkey.trim().to_string()];
+        if expected_pubkey.contains("BEGIN PGP PUBLIC KEY BLOCK")
+            && let Ok((pubkey, _)) = SignedPublicKey::from_string(expected_pubkey)
+        {
+            let fingerprint = hex::encode(pubkey.fingerprint().as_bytes()).to_uppercase();
+            expected_auth_strings.push(format!("pgp-fingerprint {fingerprint}"));
+        }
+
+        let asn_url = format!("{}/aut-num/AS{}", self.registry_url, asn);
+        let asn_response: serde_json::Value = self
+            .client
+            .get(asn_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let object_key = format!("aut-num/AS{asn}");
+        let attributes = asn_response
+            .get(&object_key)
+            .and_then(|object| object.get("Attributes"))
+            .and_then(|attributes| attributes.as_array())
+            .ok_or("The registry response has no aut-num attributes")?;
+
+        let mut maintainers = Vec::new();
+        for attribute in attributes {
+            if let Some(parts) = attribute.as_array()
+                && parts.len() == 2
+                && parts[0].as_str() == Some("mnt-by")
+                && let Some(value) = parts[1].as_str()
+                && let Some(start) = value.find("(mntner/")
+                && value.ends_with(')')
+            {
+                maintainers.push(value[start + 8..value.len() - 1].to_string());
+            }
+        }
+
+        for maintainer in maintainers {
+            let url = format!("{}/mntner/{}", self.registry_url, maintainer);
+            let response = match self.client.get(url).send().await {
+                Ok(response) if response.status().is_success() => response,
+                _ => continue,
+            };
+            let json = match response.json::<serde_json::Value>().await {
+                Ok(json) => json,
+                Err(_) => continue,
+            };
+            let object_key = format!("mntner/{maintainer}");
+            let Some(attributes) = json
+                .get(&object_key)
+                .and_then(|object| object.get("Attributes"))
+                .and_then(|attributes| attributes.as_array())
+            else {
+                continue;
+            };
+
+            for attribute in attributes {
+                if let Some(parts) = attribute.as_array()
+                    && parts.len() == 2
+                    && parts[0].as_str() == Some("auth")
+                    && let Some(value) = parts[1].as_str()
+                    && expected_auth_strings
+                        .iter()
+                        .any(|expected| expected == value.trim())
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
 pub fn verify_signature(
-    public_key_str: &str,
-    signature_str: &str,
+    public_key: &str,
+    signature: &str,
     expected_message: &str,
 ) -> Result<(), PeerError> {
-    if public_key_str.contains("BEGIN PGP PUBLIC KEY BLOCK") {
-        let (pubkey, _) = SignedPublicKey::from_string(public_key_str).map_err(|e| {
+    if public_key.contains("BEGIN PGP PUBLIC KEY BLOCK") {
+        let (public_key, _) = SignedPublicKey::from_string(public_key).map_err(|error| {
             PeerError::SignatureVerificationFailed {
-                detail: format!("Invalid PGP public key: {:?}", e),
+                detail: format!("Invalid PGP public key: {error:?}"),
             }
         })?;
-        let (sig, _) = DetachedSignature::from_string(signature_str).map_err(|e| {
+        let (signature, _) = DetachedSignature::from_string(signature).map_err(|error| {
             PeerError::SignatureVerificationFailed {
-                detail: format!("Invalid PGP signature format: {:?}", e),
+                detail: format!("Invalid PGP signature format: {error:?}"),
             }
         })?;
-        sig.verify(&pubkey, expected_message.as_bytes())
-            .map_err(|e| PeerError::SignatureVerificationFailed {
-                detail: format!("PGP signature verification failed: {:?}", e),
+        signature
+            .verify(&public_key, expected_message.as_bytes())
+            .map_err(|error| PeerError::SignatureVerificationFailed {
+                detail: format!("PGP signature verification failed: {error:?}"),
             })?;
         return Ok(());
     }
 
-    // 1. Parse SSH public key (e.g., ssh-ed25519 AAAAC3...)
-    let pubkey = PublicKey::from_str(public_key_str).map_err(|e| {
+    let public_key = PublicKey::from_str(public_key).map_err(|error| {
         PeerError::SignatureVerificationFailed {
-            detail: format!("Invalid SSH public key: {}", e),
+            detail: format!("Invalid SSH public key: {error}"),
         }
     })?;
-
-    // 2. Parse SSH signature (e.g., -----BEGIN SSH SIGNATURE----- ...)
-    let sig =
-        SshSig::from_str(signature_str).map_err(|e| PeerError::SignatureVerificationFailed {
-            detail: format!("Invalid SSH signature format: {}", e),
+    let signature =
+        SshSig::from_str(signature).map_err(|error| PeerError::SignatureVerificationFailed {
+            detail: format!("Invalid SSH signature format: {error}"),
         })?;
-
-    // 3. Verify the signature against the expected message
-    // Note: ssh-keygen -Y sign uses a namespace. We standardize on "dn42"
-    pubkey
-        .verify("dn42", expected_message.as_bytes(), &sig)
-        .map_err(|e| PeerError::SignatureVerificationFailed {
-            detail: format!("Signature verification failed: {}", e),
+    public_key
+        .verify("dn42", expected_message.as_bytes(), &signature)
+        .map_err(|error| PeerError::SignatureVerificationFailed {
+            detail: format!("Signature verification failed: {error}"),
         })?;
-
-    // Verify that this public key belongs to the ASN in the DN42 Registry
-    // Since this makes an HTTP request, we can't await it easily here if verify_signature isn't async
-    // Let's change the function signature to async!
-    // But wait, the function is synchronous. I'll make it async.
-
     Ok(())
 }
 
-pub async fn authorize_request(
+pub fn build_create_message(
     asn: u32,
-    public_key_str: &str,
-    signature_str: &str,
-    expected_message: &str,
-) -> Result<(), PeerError> {
-    // 1. Verify signature cryptographically
-    verify_signature(public_key_str, signature_str, expected_message)?;
-
-    // 2. Fetch from DN42 Registry via HTTP API
-    let is_authorized = check_registry_for_asn_and_pubkey(asn, public_key_str)
-        .await
-        .map_err(|e| PeerError::SignatureVerificationFailed {
-            detail: format!("Registry API error: {}", e),
-        })?;
-
-    if !is_authorized {
-        return Err(PeerError::RegistryMismatch);
-    }
-
-    Ok(())
+    pubkey: &WgPubKey,
+    endpoint: Option<SocketAddr>,
+    nonce: &str,
+    expires_at: i64,
+) -> String {
+    format!(
+        "DN42-AUTOPEER-V1\noperation:create\nasn:{asn}\npubkey:{pubkey}\nendpoint:{}\nnonce:{nonce}\nexpires_at:{expires_at}",
+        endpoint.map_or_else(|| "none".to_string(), |value| value.to_string())
+    )
 }
 
-#[allow(dead_code)]
-async fn check_registry_for_asn_and_pubkey(
+pub fn build_update_message(
     asn: u32,
-    expected_pubkey: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
-    let registry_url = std::env::var("REGISTRY_API_URL")
-        .unwrap_or_else(|_| "https://explorer.burble.com/api/registry".to_string());
-
-    let mut expected_auth_strings = vec![expected_pubkey.trim().to_string()];
-    if expected_pubkey.contains("BEGIN PGP PUBLIC KEY BLOCK")
-        && let Ok((pubkey, _)) = SignedPublicKey::from_string(expected_pubkey)
-    {
-        let fpr = pubkey.fingerprint();
-        let fpr_hex = hex::encode(fpr.as_bytes()).to_uppercase();
-        expected_auth_strings.push(format!("pgp-fingerprint {}", fpr_hex));
-    }
-
-    // 1. Get aut-num object
-    let asn_url = format!("{}/aut-num/AS{}", registry_url, asn);
-    let asn_resp: serde_json::Value = client
-        .get(&asn_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    let aut_num_key = format!("aut-num/AS{}", asn);
-    let aut_num_obj = asn_resp.get(&aut_num_key).ok_or("Missing aut-num object")?;
-    let attributes = aut_num_obj
-        .get("Attributes")
-        .ok_or("Missing Attributes")?
-        .as_array()
-        .ok_or("Attributes not an array")?;
-
-    let mut mntners = Vec::new();
-    for attr in attributes {
-        if let Some(arr) = attr.as_array()
-            && arr.len() == 2
-            && let (Some(key), Some(val)) = (arr[0].as_str(), arr[1].as_str())
-            && key == "mnt-by"
-        {
-            // value is something like "[MNTNER-NAME](mntner/MNTNER-NAME)"
-            // let's extract MNTNER-NAME
-            if let Some(start) = val.find("(mntner/") {
-                let end = val.len() - 1; // remove closing parenthesis
-                let mntner_name = &val[start + 8..end];
-                mntners.push(mntner_name.to_string());
-            }
-        }
-    }
-
-    // 2. Check each mntner for the auth key
-    for mntner in mntners {
-        let mntner_url = format!("{}/mntner/{}", registry_url, mntner);
-        let mntner_resp_res = client.get(&mntner_url).send().await;
-
-        if let Ok(resp) = mntner_resp_res {
-            if !resp.status().is_success() {
-                continue;
-            }
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                let mntner_key = format!("mntner/{}", mntner);
-                if let Some(obj) = json.get(&mntner_key)
-                    && let Some(attrs) = obj.get("Attributes").and_then(|a| a.as_array())
-                {
-                    for attr in attrs {
-                        if let Some(arr) = attr.as_array()
-                            && arr.len() == 2
-                            && arr[0].as_str() == Some("auth")
-                            && let Some(auth_val) = arr[1].as_str()
-                        {
-                            // The auth_val will be exactly the ssh key like "ssh-ed25519 AAA..."
-                            // Sometimes there are multiple spaces, so trim and compare, or check if it contains the pubkey
-                            // Because public_key_str contains "ssh-ed25519 AAAA...", an exact string match is usually correct
-                            // For PGP, we check if it matches the pgp-fingerprint
-                            let auth_trim = auth_val.trim();
-                            if expected_auth_strings
-                                .iter()
-                                .any(|s| s.as_str() == auth_trim)
-                            {
-                                return Ok(true);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(false)
+    pubkey: &WgPubKey,
+    endpoint: Option<Option<SocketAddr>>,
+    nonce: &str,
+    expires_at: i64,
+) -> String {
+    let endpoint = match endpoint {
+        None => "unchanged".to_string(),
+        Some(None) => "clear".to_string(),
+        Some(Some(value)) => format!("set:{value}"),
+    };
+    format!(
+        "DN42-AUTOPEER-V1\noperation:update\nasn:{asn}\npubkey:{pubkey}\nendpoint:{endpoint}\nnonce:{nonce}\nexpires_at:{expires_at}"
+    )
 }
 
-pub fn build_expected_message(asn: u32, wg_pubkey: Option<&WgPubKey>) -> String {
-    match wg_pubkey {
-        Some(key) => format!("ASN:{}|PUBKEY:{}", asn, key),
-        None => format!("ASN:{}|DELETE", asn),
+pub fn build_delete_message(asn: u32, nonce: &str, expires_at: i64) -> String {
+    format!("DN42-AUTOPEER-V1\noperation:delete\nasn:{asn}\nnonce:{nonce}\nexpires_at:{expires_at}")
+}
+
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn env_u64(name: &str, default: u64) -> Result<u64, PeerError> {
+    std::env::var(name)
+        .unwrap_or_else(|_| default.to_string())
+        .parse()
+        .map_err(|_| PeerError::Validation {
+            detail: format!("{name} must be a positive integer"),
+        })
+}
+
+fn env_usize(name: &str, default: usize) -> Result<usize, PeerError> {
+    std::env::var(name)
+        .unwrap_or_else(|_| default.to_string())
+        .parse()
+        .map_err(|_| PeerError::Validation {
+            detail: format!("{name} must be a positive integer"),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signing_messages_bind_the_operation_and_endpoint_state() {
+        let key =
+            WgPubKey::try_from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()).unwrap();
+        let create = build_create_message(4242420001, &key, None, "nonce", 100);
+        let update = build_update_message(4242420001, &key, None, "nonce", 100);
+        let clear = build_update_message(4242420001, &key, Some(None), "nonce", 100);
+        let delete = build_delete_message(4242420001, "nonce", 100);
+
+        assert_ne!(create, update);
+        assert_ne!(update, clear);
+        assert_ne!(clear, delete);
+        assert!(create.contains("expires_at:100"));
     }
 }

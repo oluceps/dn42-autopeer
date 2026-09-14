@@ -16,30 +16,24 @@ mod persist;
 mod template;
 mod wg_pubkey;
 
-use handle::{ApiDoc, AppState, create_peer, delete_peer, update_peer};
+use challenge::RequestAuthorizer;
+use handle::{ApiDoc, AppState, create_challenge, create_peer, delete_peer, update_peer};
 use manager::PeerManager;
 use persist::PeerStore;
+use wireguard_control::Key;
 
 #[tokio::main]
 async fn main() {
     println!("Initializing DN42 Autopeer Web Server...");
 
-    // Setup configuration from environment
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://dummy:dummy@localhost/dummy".to_string());
     let bird_conf_dir =
         std::env::var("BIRD_CONF_DIR").unwrap_or_else(|_| "/var/lib/autopeer".to_string());
 
-    // Ensure the config directory exists
-    std::fs::create_dir_all(&bird_conf_dir).ok();
+    std::fs::create_dir_all(&bird_conf_dir).expect("Failed to create the BIRD config directory");
 
-    println!("Using Database: {}", db_url);
     println!("Using BIRD config dir: {}", bird_conf_dir);
 
-    let wg_privkey = std::env::var("WG_PRIVATE_KEY")
-        .unwrap_or_else(|_| "q1z/aK6XjHhKxXjVvV/5lD9hW2l8aU+21u6Vz9+Y1gQ=".to_string());
-    let wg_pubkey =
-        std::env::var("WG_PUBLIC_KEY").unwrap_or_else(|_| "dummy_pubkey_replace_me=".to_string());
+    let (wg_privkey, wg_pubkey) = load_wg_keypair();
     let public_endpoint =
         std::env::var("PUBLIC_ENDPOINT").unwrap_or_else(|_| "dn42-node.example.com".to_string());
     let bird_socket =
@@ -52,6 +46,8 @@ async fn main() {
     let db = PeerStore::new()
         .await
         .expect("Failed to initialize database");
+    let authorizer =
+        RequestAuthorizer::new(db.clone()).expect("Failed to initialize request authentication");
 
     let peer_manager = Arc::new(PeerManager::new(
         db,
@@ -62,9 +58,14 @@ async fn main() {
         public_endpoint,
         local_asn, // local ASN
     ));
+    peer_manager
+        .recover()
+        .await
+        .expect("Failed to recover peer state");
 
     let state = AppState {
         manager: peer_manager,
+        authorizer,
     };
 
     let cors = CorsLayer::new()
@@ -73,6 +74,7 @@ async fn main() {
         .allow_headers(Any);
 
     let app = Router::new()
+        .route("/api/challenges", post(create_challenge))
         .route(
             "/api/peers",
             post(create_peer).patch(update_peer).delete(delete_peer),
@@ -94,6 +96,21 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
+}
+
+fn load_wg_keypair() -> (String, String) {
+    let private_key = std::env::var("WG_PRIVATE_KEY").expect("WG_PRIVATE_KEY is required");
+    let public_key = std::env::var("WG_PUBLIC_KEY").expect("WG_PUBLIC_KEY is required");
+    let parsed_private = Key::from_base64(&private_key)
+        .expect("WG_PRIVATE_KEY must be a valid WireGuard private key");
+    let parsed_public =
+        Key::from_base64(&public_key).expect("WG_PUBLIC_KEY must be a valid WireGuard public key");
+    assert_eq!(
+        parsed_private.get_public(),
+        parsed_public,
+        "WG_PUBLIC_KEY does not match WG_PRIVATE_KEY"
+    );
+    (private_key, public_key)
 }
 
 async fn shutdown_signal() {

@@ -20,14 +20,20 @@ pub struct Peer {
     pub remote_ll_ip: Ipv6Addr,
     // peer administrative and operational status
     pub status: PeerStatus,
+    // actual local UDP port allocated to this interface
+    pub listen_port: u16,
 }
 
 // operational status of the peer
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerStatus {
+    // desired state is stored, but kernel and BIRD setup is not complete
+    Provisioning,
     // configured in both kernel and bird
     Active,
+    // external state is being removed before the database row is removed
+    Deleting,
     // administratively down, config removed from bird/kernel
     Disabled,
     // failed to configure (e.g., netlink error or bird syntax error)

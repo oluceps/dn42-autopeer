@@ -60,6 +60,9 @@ pub enum PeerError {
     #[snafu(display("Provided SSH key is not identical with DN42 registry records"))]
     RegistryMismatch,
 
+    #[snafu(display("The DN42 registry is unavailable: {detail}"))]
+    RegistryUnavailable { detail: String },
+
     #[snafu(display("Peer with ASN {asn} not found"))]
     NotFound { asn: u32 },
 
@@ -127,6 +130,11 @@ impl IntoResponse for PeerError {
                 StatusCode::FORBIDDEN,
                 "registry_mismatch".to_string(),
                 Some("Provided SSH key is not identical with DN42 registry records".to_string()),
+            ),
+            PeerError::RegistryUnavailable { detail } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "registry_unavailable".to_string(),
+                Some(detail),
             ),
             PeerError::NotFound { asn } => (
                 StatusCode::NOT_FOUND,
