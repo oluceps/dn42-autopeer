@@ -10,7 +10,7 @@ It uses PostgreSQL as the durable source of peer state.
 - `wireguard-control` applies WireGuard keys, endpoints, listen ports, and peers.
 - Askama renders BIRD configuration files.
 - PostgreSQL stores desired peer state, operation state, listen ports, and authentication nonces.
-- `utoipa` publishes OpenAPI documentation through Swagger UI.
+- `utoipa` publishes the OpenAPI specification at `/api-docs/openapi.json`.
 
 ## Agent-native peering
 
@@ -247,4 +247,4 @@ export WG_PUBLIC_KEY="$(<server.pub)"
 cargo run
 ```
 
-Open `http://127.0.0.1:8080/swagger-ui/` for the interactive API documentation.
+Open `http://127.0.0.1:8080/api-docs/openapi.json` for the OpenAPI specification.

@@ -1,10 +1,11 @@
-use axum::{Router, routing::post};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
-use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
 mod challenge;
 mod error;
@@ -17,7 +18,7 @@ mod template;
 mod wg_pubkey;
 
 use challenge::RequestAuthorizer;
-use handle::{ApiDoc, AppState, create_challenge, create_peer, delete_peer, update_peer};
+use handle::{AppState, create_challenge, create_peer, delete_peer, openapi_json, update_peer};
 use manager::PeerManager;
 use persist::PeerStore;
 use wireguard_control::Key;
@@ -79,7 +80,7 @@ async fn main() {
             "/api/peers",
             post(create_peer).patch(update_peer).delete(delete_peer),
         )
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .route("/api-docs/openapi.json", get(openapi_json))
         .with_state(state)
         .layer(cors);
 
@@ -89,7 +90,10 @@ async fn main() {
         .expect("PORT must be a valid u16 integer");
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("Listening on http://{}", addr);
-    println!("Swagger UI available at http://{}/swagger-ui/", addr);
+    println!(
+        "OpenAPI specification available at http://{}/api-docs/openapi.json",
+        addr
+    );
 
     let listener = TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app)

@@ -103,6 +103,10 @@ pub struct AppState {
     pub authorizer: RequestAuthorizer,
 }
 
+pub async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(ApiDoc::openapi())
+}
+
 #[utoipa::path(
     post,
     path = "/api/challenges",
