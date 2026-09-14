@@ -63,11 +63,11 @@ pub enum PeerError {
     #[snafu(display("The DN42 registry is unavailable: {detail}"))]
     RegistryUnavailable { detail: String },
 
-    #[snafu(display("Peer with ASN {asn} not found"))]
-    NotFound { asn: u32 },
+    #[snafu(display("Peer '{peer_name}' with ASN {asn} not found"))]
+    NotFound { asn: u32, peer_name: String },
 
-    #[snafu(display("Peer with ASN {asn} already exists"))]
-    AlreadyExists { asn: u32 },
+    #[snafu(display("Peer '{peer_name}' with ASN {asn} already exists"))]
+    AlreadyExists { asn: u32, peer_name: String },
 }
 
 // unified api error response body: a stable machine-readable code plus
@@ -136,15 +136,15 @@ impl IntoResponse for PeerError {
                 "registry_unavailable".to_string(),
                 Some(detail),
             ),
-            PeerError::NotFound { asn } => (
+            PeerError::NotFound { asn, peer_name } => (
                 StatusCode::NOT_FOUND,
                 "not_found".to_string(),
-                Some(format!("Peer with ASN {} not found", asn)),
+                Some(format!("Peer '{peer_name}' with ASN {asn} not found")),
             ),
-            PeerError::AlreadyExists { asn } => (
+            PeerError::AlreadyExists { asn, peer_name } => (
                 StatusCode::CONFLICT,
                 "already_exists".to_string(),
-                Some(format!("Peer with ASN {} already exists", asn)),
+                Some(format!("Peer '{peer_name}' with ASN {asn} already exists")),
             ),
             // everything below is a server-side failure
             // TODO: handle

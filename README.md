@@ -22,7 +22,7 @@ npx skills add oluceps/dn42-autopeer
 
 Select your coding agent and installation scope when the CLI asks.
 The skill reads the live [OpenAPI specification](https://dn42.nyaw.xyz/api-docs/openapi.json), gets a single-use challenge, and prepares the signed request.
-Supply your ASN, public endpoint, and the path to a registered maintainer signing key.
+Supply your ASN, peer name, public endpoint, and the path to a registered maintainer signing key.
 The agent can generate a WireGuard key pair locally and return the exact WireGuard and BGP settings from the API.
 Private keys stay on your system.
 
@@ -30,6 +30,7 @@ Example prompt:
 
 ```text
 Use $nyaw-dn42-autopeer to peer AS4242421234 with Nyaw.
+Use peer name fra1 for this machine.
 My endpoint is 198.51.100.1:51820, and my registered SSH key is ~/.ssh/id_ed25519.
 Save the new WireGuard key pair under ./secrets/nyaw-peer/.
 ```
@@ -41,7 +42,7 @@ The server stores each nonce in PostgreSQL.
 It atomically deletes the nonce after signature verification and before the registry lookup.
 A second request with the same nonce fails.
 
-The signature covers the operation, ASN, all mutable request fields, nonce, and expiration time.
+The signature covers the operation, ASN, peer name, all mutable request fields, nonce, and expiration time.
 SSH signatures use the `dn42` namespace.
 The service also accepts detached PGP signatures.
 
@@ -70,9 +71,10 @@ The server normalizes each endpoint through `SocketAddr` before it builds the me
 Create:
 
 ```text
-DN42-AUTOPEER-V1
+DN42-AUTOPEER-V2
 operation:create
 asn:<asn>
+peer_name:<peer-name>
 pubkey:<wireguard-public-key>
 endpoint:<normalized-IP:PORT-or-none>
 nonce:<nonce>
@@ -82,9 +84,10 @@ expires_at:<unix-timestamp>
 Update with a new endpoint:
 
 ```text
-DN42-AUTOPEER-V1
+DN42-AUTOPEER-V2
 operation:update
 asn:<asn>
+peer_name:<peer-name>
 pubkey:<wireguard-public-key>
 endpoint:set:<normalized-IP:PORT>
 nonce:<nonce>
@@ -97,9 +100,10 @@ Use `endpoint:clear` when the JSON field is `null`.
 Delete:
 
 ```text
-DN42-AUTOPEER-V1
+DN42-AUTOPEER-V2
 operation:delete
 asn:<asn>
+peer_name:<peer-name>
 nonce:<nonce>
 expires_at:<unix-timestamp>
 ```
@@ -116,6 +120,7 @@ Also put the registered public key, nonce, and expiration value in `challenge`.
 ```json
 {
   "asn": 4242421234,
+  "peer_name": "fra1",
   "pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
   "endpoint": "198.51.100.1:51820",
   "challenge": {
@@ -132,7 +137,11 @@ Also put the registered public key, nonce, and expiration value in `challenge`.
 ### Create a peer
 
 `POST /api/peers` returns HTTP `201 Created`.
-The response contains the allocated listen port, link-local addresses, and local public key.
+The response contains the peer ID, peer name, allocated listen port, link-local addresses, and local public key.
+
+Use a different peer name for each machine under one ASN.
+The name must match `[a-z0-9][a-z0-9-]{0,31}`.
+Create, update, and delete requests use the ASN and peer name as the public identity.
 
 The preferred listen port is `20000 + (ASN % 10000)`.
 The service checks PostgreSQL and existing WireGuard interfaces for conflicts.
@@ -142,6 +151,7 @@ It increments the port until it finds an available value, then stores that value
 
 `PATCH /api/peers` can replace the WireGuard public key and endpoint.
 The service replaces the complete kernel peer list, so an old public key stops working.
+The ASN and peer name select the machine to update.
 
 An absent `endpoint` field keeps the current endpoint.
 An `endpoint` value of `null` clears it.
@@ -149,13 +159,38 @@ An `endpoint` value of `null` clears it.
 ### Delete a peer
 
 `DELETE /api/peers` removes the BIRD configuration and WireGuard interface.
+The ASN and peer name select the machine to delete.
 The service only ignores a missing configuration file or interface.
 Other removal errors stop the operation.
 
+## BIRD policy hooks
+
+Each generated BGP protocol passes the remote ASN and peer ID to two functions in the main BIRD configuration:
+
+```bird
+function dn42_import_from_peer(int peer_asn; int peer_id) -> bool {
+  # Add machine-specific branches before this default.
+  return false;
+}
+
+function dn42_export_to_peer(int peer_asn; int peer_id) -> bool {
+  # Add machine-specific branches before this default.
+  return false;
+}
+
+import where dn42_import_from_peer(<remote-asn>, <peer-id>);
+export where dn42_export_to_peer(<remote-asn>, <peer-id>);
+```
+
+Define both functions before the main configuration includes the generated peer fragments.
+Each function must return a Boolean value.
+Use the peer ID for machine-specific branches.
+Keep a final default branch for new machines.
+
 ## State recovery
 
-Each ASN has one in-process mutation lock.
-This lock serializes create, update, and delete operations for that ASN.
+Each `(ASN, peer name)` pair has one in-process mutation lock.
+This lock serializes changes for one machine without blocking another machine under the same ASN.
 
 The database records `provisioning` before an external create or update.
 It records `deleting` before an external delete.

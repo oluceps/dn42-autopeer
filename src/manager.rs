@@ -30,7 +30,7 @@ pub struct PeerManager {
     pub local_wg_pubkey: String,
     pub public_endpoint: String,
     pub local_asn: u32,
-    mutation_locks: DashMap<u32, Arc<Mutex<()>>>,
+    mutation_locks: DashMap<(u32, String), Arc<Mutex<()>>>,
     port_lock: Mutex<()>,
 }
 
@@ -60,26 +60,30 @@ impl PeerManager {
     pub async fn create_peer(
         &self,
         asn: u32,
+        peer_name: String,
         pubkey: WgPubKey,
         endpoint: Option<SocketAddr>,
     ) -> Result<Peer, PeerError> {
-        let operation_lock = self.operation_lock(asn);
+        let operation_lock = self.operation_lock(asn, &peer_name);
         let _operation_guard = operation_lock.lock().await;
-        if self.db.peer_exists(asn).await? {
-            return Err(PeerError::AlreadyExists { asn });
+        if self.db.peer_exists(asn, &peer_name).await? {
+            return Err(PeerError::AlreadyExists { asn, peer_name });
         }
 
         let peer = {
             let _port_guard = self.port_lock.lock().await;
-            self.reserve_peer(asn, pubkey, endpoint).await?
+            self.reserve_peer(asn, peer_name, pubkey, endpoint).await?
         };
 
         if let Err(error) = self.apply_peer(&peer).await {
             self.compensate_failed_create(&peer).await;
             return Err(error);
         }
-        if !self.db.set_status(asn, PeerStatus::Active).await? {
-            return Err(PeerError::NotFound { asn });
+        if !self.db.set_status(peer.peer_id, PeerStatus::Active).await? {
+            return Err(PeerError::NotFound {
+                asn,
+                peer_name: peer.peer_name,
+            });
         }
         Ok(Peer {
             status: PeerStatus::Active,
@@ -90,18 +94,22 @@ impl PeerManager {
     pub async fn update_peer(
         &self,
         asn: u32,
+        peer_name: String,
         pubkey: WgPubKey,
         endpoint: Option<Option<SocketAddr>>,
     ) -> Result<Peer, PeerError> {
-        let operation_lock = self.operation_lock(asn);
+        let operation_lock = self.operation_lock(asn, &peer_name);
         let _operation_guard = operation_lock.lock().await;
-        let old_peer = self
-            .db
-            .get_peer(asn)
-            .await?
-            .ok_or(PeerError::NotFound { asn })?;
+        let old_peer =
+            self.db
+                .get_peer(asn, &peer_name)
+                .await?
+                .ok_or_else(|| PeerError::NotFound {
+                    asn,
+                    peer_name: peer_name.clone(),
+                })?;
         if old_peer.status == PeerStatus::Deleting {
-            return Err(PeerError::NotFound { asn });
+            return Err(PeerError::NotFound { asn, peer_name });
         }
 
         let desired_peer = Peer {
@@ -111,15 +119,19 @@ impl PeerManager {
             ..old_peer.clone()
         };
         if !self.db.update_peer_desired(&desired_peer).await? {
-            return Err(PeerError::NotFound { asn });
+            return Err(PeerError::NotFound { asn, peer_name });
         }
 
         if let Err(error) = self.apply_peer(&desired_peer).await {
             self.compensate_failed_update(&old_peer).await;
             return Err(error);
         }
-        if !self.db.set_status(asn, PeerStatus::Active).await? {
-            return Err(PeerError::NotFound { asn });
+        if !self
+            .db
+            .set_status(desired_peer.peer_id, PeerStatus::Active)
+            .await?
+        {
+            return Err(PeerError::NotFound { asn, peer_name });
         }
         Ok(Peer {
             status: PeerStatus::Active,
@@ -127,40 +139,50 @@ impl PeerManager {
         })
     }
 
-    pub async fn delete_peer(&self, asn: u32) -> Result<(), PeerError> {
-        let operation_lock = self.operation_lock(asn);
+    pub async fn delete_peer(&self, asn: u32, peer_name: String) -> Result<Peer, PeerError> {
+        let operation_lock = self.operation_lock(asn, &peer_name);
         let _operation_guard = operation_lock.lock().await;
         let peer = self
             .db
-            .get_peer(asn)
+            .get_peer(asn, &peer_name)
             .await?
-            .ok_or(PeerError::NotFound { asn })?;
-        if !self.db.set_status(asn, PeerStatus::Deleting).await? {
-            return Err(PeerError::NotFound { asn });
+            .ok_or_else(|| PeerError::NotFound {
+                asn,
+                peer_name: peer_name.clone(),
+            })?;
+        if !self
+            .db
+            .set_status(peer.peer_id, PeerStatus::Deleting)
+            .await?
+        {
+            return Err(PeerError::NotFound { asn, peer_name });
         }
 
         if let Err(error) = self.remove_external_state(&peer).await {
             if self.apply_peer(&peer).await.is_ok() {
-                let _ = self.db.set_status(asn, PeerStatus::Active).await;
+                let _ = self.db.set_status(peer.peer_id, PeerStatus::Active).await;
             }
             return Err(error);
         }
 
         // If this delete fails, the durable deleting state makes startup finish the operation.
-        if !self.db.delete_peer(asn).await? {
-            return Err(PeerError::NotFound { asn });
+        if !self.db.delete_peer(peer.peer_id).await? {
+            return Err(PeerError::NotFound { asn, peer_name });
         }
-        Ok(())
+        Ok(peer)
     }
 
     pub async fn recover(&self) -> Result<(), PeerError> {
         for peer in self.db.list_peers().await? {
-            let operation_lock = self.operation_lock(peer.asn);
+            let operation_lock = self.operation_lock(peer.asn, &peer.peer_name);
             let _operation_guard = operation_lock.lock().await;
             if peer.status == PeerStatus::Deleting {
                 self.remove_external_state(&peer).await?;
-                if !self.db.delete_peer(peer.asn).await? {
-                    return Err(PeerError::NotFound { asn: peer.asn });
+                if !self.db.delete_peer(peer.peer_id).await? {
+                    return Err(PeerError::NotFound {
+                        asn: peer.asn,
+                        peer_name: peer.peer_name,
+                    });
                 }
                 continue;
             }
@@ -169,8 +191,11 @@ impl PeerManager {
             }
 
             self.apply_peer(&peer).await?;
-            if !self.db.set_status(peer.asn, PeerStatus::Active).await? {
-                return Err(PeerError::NotFound { asn: peer.asn });
+            if !self.db.set_status(peer.peer_id, PeerStatus::Active).await? {
+                return Err(PeerError::NotFound {
+                    asn: peer.asn,
+                    peer_name: peer.peer_name,
+                });
             }
         }
         Ok(())
@@ -179,9 +204,11 @@ impl PeerManager {
     async fn reserve_peer(
         &self,
         asn: u32,
+        peer_name: String,
         pubkey: WgPubKey,
         endpoint: Option<SocketAddr>,
     ) -> Result<Peer, PeerError> {
+        let peer_id = self.db.allocate_peer_id().await?;
         let preferred_offset = asn % 10_000;
         for increment in 0..10_000_u32 {
             let offset = (preferred_offset + increment) % 10_000;
@@ -190,12 +217,19 @@ impl PeerManager {
                 continue;
             }
 
-            let peer = self.build_peer(asn, pubkey.clone(), endpoint, listen_port);
+            let peer = self.build_peer(
+                peer_id,
+                asn,
+                peer_name.clone(),
+                pubkey.clone(),
+                endpoint,
+                listen_port,
+            );
             if self.db.reserve_peer(&peer).await? {
                 return Ok(peer);
             }
-            if self.db.peer_exists(asn).await? {
-                return Err(PeerError::AlreadyExists { asn });
+            if self.db.peer_exists(asn, &peer_name).await? {
+                return Err(PeerError::AlreadyExists { asn, peer_name });
             }
         }
         Err(PeerError::Validation {
@@ -205,13 +239,17 @@ impl PeerManager {
 
     fn build_peer(
         &self,
+        peer_id: u32,
         asn: u32,
+        peer_name: String,
         pubkey: WgPubKey,
         endpoint: Option<SocketAddr>,
         listen_port: u16,
     ) -> Peer {
         Peer {
-            iface_name: format!("wg{asn}"),
+            peer_id,
+            peer_name,
+            iface_name: format!("wgp{peer_id}"),
             asn,
             pubkey,
             endpoint,
@@ -236,9 +274,9 @@ impl PeerManager {
     }
 
     async fn compensate_failed_create(&self, peer: &Peer) {
-        let _ = self.db.set_status(peer.asn, PeerStatus::Deleting).await;
+        let _ = self.db.set_status(peer.peer_id, PeerStatus::Deleting).await;
         if self.remove_external_state(peer).await.is_ok() {
-            let _ = self.db.delete_peer(peer.asn).await;
+            let _ = self.db.delete_peer(peer.peer_id).await;
         }
     }
 
@@ -247,12 +285,17 @@ impl PeerManager {
             return;
         }
         if self.db.update_peer_desired(old_peer).await.is_ok() {
-            let _ = self.db.set_status(old_peer.asn, PeerStatus::Active).await;
+            let _ = self
+                .db
+                .set_status(old_peer.peer_id, PeerStatus::Active)
+                .await;
         }
     }
 
     async fn install_bird_config(&self, peer: &Peer) -> Result<(), PeerError> {
         let template = PeerTemplate {
+            peer_id: peer.peer_id,
+            peer_name: &peer.peer_name,
             asn: peer.asn,
             local_asn: self.local_asn,
             iface: &peer.iface_name,
@@ -421,9 +464,9 @@ impl PeerManager {
         }
     }
 
-    fn operation_lock(&self, asn: u32) -> Arc<Mutex<()>> {
+    fn operation_lock(&self, asn: u32, peer_name: &str) -> Arc<Mutex<()>> {
         self.mutation_locks
-            .entry(asn)
+            .entry((asn, peer_name.to_string()))
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }

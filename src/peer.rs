@@ -6,6 +6,10 @@ use crate::wg_pubkey::WgPubKey;
 // represents a fully resolved, active wireguard and bgp peer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {
+    // stable internal identifier used in generated BIRD policy calls
+    pub peer_id: u32,
+    // user-selected machine name, unique within an ASN
+    pub peer_name: String,
     // unique interface name, e.g., "wg-peer-4242"
     pub iface_name: String,
     // dn42 autonomous system number

@@ -6,6 +6,8 @@ use std::net::Ipv6Addr;
 #[derive(Template)]
 #[template(path = "peer.conf")]
 pub struct PeerTemplate<'a> {
+    pub peer_id: u32,
+    pub peer_name: &'a str,
     pub asn: u32,
     pub local_asn: u32,
     pub iface: &'a str,
@@ -69,6 +71,8 @@ mod tests {
     #[test]
     fn test_peer_template_rendering() {
         let tmpl = PeerTemplate {
+            peer_id: 7,
+            peer_name: "fra1",
             asn: 4242421234,
             local_asn: 4242420291,
             iface: "wg-peer-4242",
@@ -77,15 +81,20 @@ mod tests {
         };
 
         let result = tmpl.render().unwrap();
-        assert!(result.contains("protocol bgp dn42_4242421234"));
+        assert!(result.contains("protocol bgp dn42_4242421234_7"));
+        assert!(result.contains("Peer name: fra1 (ID 7)"));
         assert!(result.contains("local fe80::1 as 4242420291;"));
         assert!(result.contains("neighbor fe80::2 % 'wg-peer-4242' as 4242421234;"));
         assert!(result.contains("table dn42_v6;"));
+        assert!(result.contains("import where dn42_import_from_peer(4242421234, 7);"));
+        assert!(result.contains("export where dn42_export_to_peer(4242421234, 7);"));
     }
 
     #[test]
     fn test_escaper_prevents_injection() {
         let tmpl = PeerTemplate {
+            peer_id: 7,
+            peer_name: "fra1",
             asn: 4242421234,
             local_asn: 4242420291,
             iface: "wg-peer';\n  include \"/etc/shadow\";\n  #",

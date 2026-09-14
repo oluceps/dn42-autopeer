@@ -232,19 +232,21 @@ pub fn verify_signature(
 
 pub fn build_create_message(
     asn: u32,
+    peer_name: &str,
     pubkey: &WgPubKey,
     endpoint: Option<SocketAddr>,
     nonce: &str,
     expires_at: i64,
 ) -> String {
     format!(
-        "DN42-AUTOPEER-V1\noperation:create\nasn:{asn}\npubkey:{pubkey}\nendpoint:{}\nnonce:{nonce}\nexpires_at:{expires_at}",
+        "DN42-AUTOPEER-V2\noperation:create\nasn:{asn}\npeer_name:{peer_name}\npubkey:{pubkey}\nendpoint:{}\nnonce:{nonce}\nexpires_at:{expires_at}",
         endpoint.map_or_else(|| "none".to_string(), |value| value.to_string())
     )
 }
 
 pub fn build_update_message(
     asn: u32,
+    peer_name: &str,
     pubkey: &WgPubKey,
     endpoint: Option<Option<SocketAddr>>,
     nonce: &str,
@@ -256,12 +258,14 @@ pub fn build_update_message(
         Some(Some(value)) => format!("set:{value}"),
     };
     format!(
-        "DN42-AUTOPEER-V1\noperation:update\nasn:{asn}\npubkey:{pubkey}\nendpoint:{endpoint}\nnonce:{nonce}\nexpires_at:{expires_at}"
+        "DN42-AUTOPEER-V2\noperation:update\nasn:{asn}\npeer_name:{peer_name}\npubkey:{pubkey}\nendpoint:{endpoint}\nnonce:{nonce}\nexpires_at:{expires_at}"
     )
 }
 
-pub fn build_delete_message(asn: u32, nonce: &str, expires_at: i64) -> String {
-    format!("DN42-AUTOPEER-V1\noperation:delete\nasn:{asn}\nnonce:{nonce}\nexpires_at:{expires_at}")
+pub fn build_delete_message(asn: u32, peer_name: &str, nonce: &str, expires_at: i64) -> String {
+    format!(
+        "DN42-AUTOPEER-V2\noperation:delete\nasn:{asn}\npeer_name:{peer_name}\nnonce:{nonce}\nexpires_at:{expires_at}"
+    )
 }
 
 fn unix_timestamp() -> i64 {
@@ -297,14 +301,17 @@ mod tests {
     fn signing_messages_bind_the_operation_and_endpoint_state() {
         let key =
             WgPubKey::try_from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()).unwrap();
-        let create = build_create_message(4242420001, &key, None, "nonce", 100);
-        let update = build_update_message(4242420001, &key, None, "nonce", 100);
-        let clear = build_update_message(4242420001, &key, Some(None), "nonce", 100);
-        let delete = build_delete_message(4242420001, "nonce", 100);
+        let create = build_create_message(4242420001, "fra1", &key, None, "nonce", 100);
+        let update = build_update_message(4242420001, "fra1", &key, None, "nonce", 100);
+        let clear = build_update_message(4242420001, "fra1", &key, Some(None), "nonce", 100);
+        let delete = build_delete_message(4242420001, "fra1", "nonce", 100);
+        let other_peer = build_delete_message(4242420001, "sin1", "nonce", 100);
 
         assert_ne!(create, update);
         assert_ne!(update, clear);
         assert_ne!(clear, delete);
+        assert_ne!(delete, other_peer);
+        assert!(create.contains("peer_name:fra1"));
         assert!(create.contains("expires_at:100"));
     }
 }

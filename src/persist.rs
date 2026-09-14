@@ -37,25 +37,21 @@ impl PeerStore {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS peers (
-                asn BIGINT PRIMARY KEY,
+                peer_id SERIAL PRIMARY KEY,
+                asn BIGINT NOT NULL,
+                peer_name VARCHAR(32) NOT NULL,
                 iface_name VARCHAR NOT NULL,
                 pubkey VARCHAR NOT NULL,
                 endpoint VARCHAR,
                 local_ll_ip VARCHAR NOT NULL,
                 remote_ll_ip VARCHAR NOT NULL,
                 status VARCHAR NOT NULL,
-                listen_port INT NOT NULL,
+                listen_port INT NOT NULL UNIQUE,
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (asn, peer_name)
             )
             "#,
-        )
-        .execute(&pool)
-        .await
-        .map_err(|source| PeerError::Database { source })?;
-
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS peers_listen_port_key ON peers (listen_port)",
         )
         .execute(&pool)
         .await
@@ -128,12 +124,14 @@ impl PeerStore {
         let result = sqlx::query(
             r#"
             INSERT INTO peers
-                (asn, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port)
-            VALUES ($1, $2, $3, $4, $5, $6, 'provisioning', $7)
+                (peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'provisioning', $9)
             ON CONFLICT DO NOTHING
             "#,
         )
+        .bind(peer.peer_id as i32)
         .bind(peer.asn as i64)
+        .bind(&peer.peer_name)
         .bind(&peer.iface_name)
         .bind(peer.pubkey.as_str())
         .bind(peer.endpoint.map(|value| value.to_string()))
@@ -144,6 +142,16 @@ impl PeerStore {
         .await
         .map_err(|source| PeerError::Database { source })?;
         Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn allocate_peer_id(&self) -> Result<u32, PeerError> {
+        let (peer_id,): (i64,) = sqlx::query_as("SELECT nextval('peers_peer_id_seq')")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|source| PeerError::Database { source })?;
+        u32::try_from(peer_id).map_err(|_| PeerError::Validation {
+            detail: "The peer ID sequence is exhausted".to_string(),
+        })
     }
 
     pub async fn update_peer_desired(&self, peer: &Peer) -> Result<bool, PeerError> {
@@ -158,10 +166,10 @@ impl PeerStore {
                 status = 'provisioning',
                 listen_port = $7,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE asn = $1
+            WHERE peer_id = $1
             "#,
         )
-        .bind(peer.asn as i64)
+        .bind(peer.peer_id as i32)
         .bind(&peer.iface_name)
         .bind(peer.pubkey.as_str())
         .bind(peer.endpoint.map(|value| value.to_string()))
@@ -174,12 +182,12 @@ impl PeerStore {
         Ok(result.rows_affected() == 1)
     }
 
-    pub async fn set_status(&self, asn: u32, status: PeerStatus) -> Result<bool, PeerError> {
+    pub async fn set_status(&self, peer_id: u32, status: PeerStatus) -> Result<bool, PeerError> {
         let status = status_to_str(&status);
         let result = sqlx::query(
-            "UPDATE peers SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE asn = $1",
+            "UPDATE peers SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE peer_id = $1",
         )
-        .bind(asn as i64)
+        .bind(peer_id as i32)
         .bind(status)
         .execute(&self.pool)
         .await
@@ -187,33 +195,35 @@ impl PeerStore {
         Ok(result.rows_affected() == 1)
     }
 
-    pub async fn delete_peer(&self, asn: u32) -> Result<bool, PeerError> {
-        let result = sqlx::query("DELETE FROM peers WHERE asn = $1")
-            .bind(asn as i64)
+    pub async fn delete_peer(&self, peer_id: u32) -> Result<bool, PeerError> {
+        let result = sqlx::query("DELETE FROM peers WHERE peer_id = $1")
+            .bind(peer_id as i32)
             .execute(&self.pool)
             .await
             .map_err(|source| PeerError::Database { source })?;
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn peer_exists(&self, asn: u32) -> Result<bool, PeerError> {
+    pub async fn peer_exists(&self, asn: u32, peer_name: &str) -> Result<bool, PeerError> {
         let (exists,): (bool,) =
-            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM peers WHERE asn = $1)")
+            sqlx::query_as("SELECT EXISTS(SELECT 1 FROM peers WHERE asn = $1 AND peer_name = $2)")
                 .bind(asn as i64)
+                .bind(peer_name)
                 .fetch_one(&self.pool)
                 .await
                 .map_err(|source| PeerError::Database { source })?;
         Ok(exists)
     }
 
-    pub async fn get_peer(&self, asn: u32) -> Result<Option<Peer>, PeerError> {
+    pub async fn get_peer(&self, asn: u32, peer_name: &str) -> Result<Option<Peer>, PeerError> {
         let row = sqlx::query(
             r#"
-            SELECT asn, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port
-            FROM peers WHERE asn = $1
+            SELECT peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port
+            FROM peers WHERE asn = $1 AND peer_name = $2
             "#,
         )
         .bind(asn as i64)
+        .bind(peer_name)
         .fetch_optional(&self.pool)
         .await
         .map_err(|source| PeerError::Database { source })?;
@@ -223,8 +233,8 @@ impl PeerStore {
     pub async fn list_peers(&self) -> Result<Vec<Peer>, PeerError> {
         let rows = sqlx::query(
             r#"
-            SELECT asn, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port
-            FROM peers ORDER BY asn
+            SELECT peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port
+            FROM peers ORDER BY asn, peer_name
             "#,
         )
         .fetch_all(&self.pool)
@@ -235,6 +245,10 @@ impl PeerStore {
 }
 
 fn row_to_peer(row: sqlx::postgres::PgRow) -> Result<Peer, PeerError> {
+    let peer_id =
+        u32::try_from(row.get::<i32, _>("peer_id")).map_err(|_| PeerError::Validation {
+            detail: "The database contains an invalid peer ID".to_string(),
+        })?;
     let asn = u32::try_from(row.get::<i64, _>("asn")).map_err(|_| PeerError::Validation {
         detail: "The database contains an invalid ASN".to_string(),
     })?;
@@ -264,6 +278,8 @@ fn row_to_peer(row: sqlx::postgres::PgRow) -> Result<Peer, PeerError> {
         })?;
 
     Ok(Peer {
+        peer_id,
+        peer_name: row.get("peer_name"),
         iface_name: row.get("iface_name"),
         asn,
         pubkey,

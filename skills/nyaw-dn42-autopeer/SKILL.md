@@ -17,7 +17,10 @@ Do not use its request formats with another autopeer service.
 
 ## Collect inputs
 
-Get the operation, ASN, and registered maintainer authentication method.
+Get the operation, ASN, peer name, and registered maintainer authentication method.
+Use a different peer name for each machine under one ASN.
+Use the same peer name for later update or delete requests.
+The peer name must match `[a-z0-9][a-z0-9-]{0,31}`.
 For create or update, also get a WireGuard public key and the endpoint choice.
 If the user has no WireGuard key pair, generate and save one locally.
 An endpoint must use `IP:PORT`. Put brackets around an IPv6 address.
@@ -25,7 +28,7 @@ An endpoint must use `IP:PORT`. Put brackets around an IPv6 address.
 ## Run the workflow
 
 1. Read `https://dn42.nyaw.xyz/api-docs/openapi.json` for the current request and response schemas.
-2. Prepare and normalize all mutation fields before you request a challenge.
+2. Prepare and normalize all mutation fields, including the peer name, before you request a challenge.
 3. Send `POST /api/challenges` with the ASN.
 4. Build the exact signing message below without a final newline.
 5. Sign the message with a key from the ASN maintainer's DN42 Registry `auth` attribute.
@@ -47,9 +50,10 @@ Use a JSON serializer when you add the multiline public key and signature to the
 Create:
 
 ```text
-DN42-AUTOPEER-V1
+DN42-AUTOPEER-V2
 operation:create
 asn:<asn>
+peer_name:<peer-name>
 pubkey:<wireguard-public-key>
 endpoint:<normalized-IP:PORT-or-none>
 nonce:<nonce>
@@ -59,9 +63,10 @@ expires_at:<unix-timestamp>
 Update:
 
 ```text
-DN42-AUTOPEER-V1
+DN42-AUTOPEER-V2
 operation:update
 asn:<asn>
+peer_name:<peer-name>
 pubkey:<wireguard-public-key>
 endpoint:<unchanged-or-clear-or-set:normalized-IP:PORT>
 nonce:<nonce>
@@ -74,9 +79,10 @@ Set that field to `null` to clear it.
 Delete:
 
 ```text
-DN42-AUTOPEER-V1
+DN42-AUTOPEER-V2
 operation:delete
 asn:<asn>
+peer_name:<peer-name>
 nonce:<nonce>
 expires_at:<unix-timestamp>
 ```
@@ -86,5 +92,6 @@ expires_at:<unix-timestamp>
 Treat each challenge as single-use, including after a failed mutation.
 If a challenge expires or fails, request a new challenge and create a new signature.
 After create, preserve the generated WireGuard private key and show its path.
+After each mutation, report the returned peer ID and peer name.
 Use the server response as the source for its endpoint, public key, link address, and BGP neighbor.
 Do not perform local network changes unless the user includes that system or configuration repository in scope.

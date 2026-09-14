@@ -36,6 +36,8 @@ pub struct ChallengeResponse {
 pub struct CreatePeerReq {
     #[schema(example = 4242421234_u32)]
     pub asn: u32,
+    #[schema(example = "fra1")]
+    pub peer_name: String,
     #[schema(example = "xyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyz=", value_type = String)]
     pub pubkey: WgPubKey,
     #[schema(example = "198.51.100.1:51820")]
@@ -47,6 +49,8 @@ pub struct CreatePeerReq {
 pub struct UpdatePeerReq {
     #[schema(example = 4242421234_u32)]
     pub asn: u32,
+    #[schema(example = "fra1")]
+    pub peer_name: String,
     #[schema(example = "xyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyz=", value_type = String)]
     pub pubkey: WgPubKey,
     #[serde(default, deserialize_with = "deserialize_present_option")]
@@ -59,6 +63,8 @@ pub struct UpdatePeerReq {
 pub struct DeletePeerReq {
     #[schema(example = 4242421234_u32)]
     pub asn: u32,
+    #[schema(example = "fra1")]
+    pub peer_name: String,
     pub challenge: Challenge,
 }
 
@@ -67,6 +73,8 @@ pub struct PeerResponse {
     #[schema(example = "success")]
     pub status: String,
     pub message: String,
+    pub peer_id: u32,
+    pub peer_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wg_config: Option<WgConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -132,9 +140,11 @@ pub async fn create_peer(
     State(state): State<AppState>,
     Json(payload): Json<CreatePeerReq>,
 ) -> Result<(StatusCode, Json<PeerResponse>), PeerError> {
+    let peer_name = parse_peer_name(&payload.peer_name)?;
     let endpoint = parse_endpoint(payload.endpoint.as_deref())?;
     let message = crate::challenge::build_create_message(
         payload.asn,
+        &peer_name,
         &payload.pubkey,
         endpoint,
         &payload.challenge.nonce,
@@ -144,13 +154,15 @@ pub async fn create_peer(
 
     let peer = state
         .manager
-        .create_peer(payload.asn, payload.pubkey, endpoint)
+        .create_peer(payload.asn, peer_name, payload.pubkey, endpoint)
         .await?;
     Ok((
         StatusCode::CREATED,
         Json(PeerResponse {
             status: "success".to_string(),
             message: "The server configured the peer in BIRD and the kernel".to_string(),
+            peer_id: peer.peer_id,
+            peer_name: peer.peer_name.clone(),
             wg_config: Some(WgConfig {
                 your_assigned_ip: format!("{}/64", peer.remote_ll_ip),
                 my_endpoint: format!("{}:{}", state.manager.public_endpoint, peer.listen_port),
@@ -183,6 +195,7 @@ pub async fn update_peer(
     State(state): State<AppState>,
     Json(payload): Json<UpdatePeerReq>,
 ) -> Result<Json<PeerResponse>, PeerError> {
+    let peer_name = parse_peer_name(&payload.peer_name)?;
     let endpoint = payload
         .endpoint
         .as_ref()
@@ -190,6 +203,7 @@ pub async fn update_peer(
         .transpose()?;
     let message = crate::challenge::build_update_message(
         payload.asn,
+        &peer_name,
         &payload.pubkey,
         endpoint,
         &payload.challenge.nonce,
@@ -197,13 +211,15 @@ pub async fn update_peer(
     );
     authorize(&state, payload.asn, &payload.challenge, &message).await?;
 
-    state
+    let peer = state
         .manager
-        .update_peer(payload.asn, payload.pubkey, endpoint)
+        .update_peer(payload.asn, peer_name, payload.pubkey, endpoint)
         .await?;
     Ok(Json(PeerResponse {
         status: "success".to_string(),
         message: "The server updated the peer".to_string(),
+        peer_id: peer.peer_id,
+        peer_name: peer.peer_name,
         wg_config: None,
         bgp_config: None,
     }))
@@ -225,16 +241,20 @@ pub async fn delete_peer(
     State(state): State<AppState>,
     Json(payload): Json<DeletePeerReq>,
 ) -> Result<Json<PeerResponse>, PeerError> {
+    let peer_name = parse_peer_name(&payload.peer_name)?;
     let message = crate::challenge::build_delete_message(
         payload.asn,
+        &peer_name,
         &payload.challenge.nonce,
         payload.challenge.expires_at,
     );
     authorize(&state, payload.asn, &payload.challenge, &message).await?;
-    state.manager.delete_peer(payload.asn).await?;
+    let peer = state.manager.delete_peer(payload.asn, peer_name).await?;
     Ok(Json(PeerResponse {
         status: "success".to_string(),
         message: "The server removed the peer".to_string(),
+        peer_id: peer.peer_id,
+        peer_name: peer.peer_name,
         wg_config: None,
         bgp_config: None,
     }))
@@ -268,6 +288,23 @@ fn parse_endpoint(endpoint: Option<&str>) -> Result<Option<SocketAddr>, PeerErro
         })
 }
 
+fn parse_peer_name(peer_name: &str) -> Result<String, PeerError> {
+    let peer_name = peer_name.trim();
+    let mut characters = peer_name.chars();
+    let valid_first = characters
+        .next()
+        .is_some_and(|character| character.is_ascii_lowercase() || character.is_ascii_digit());
+    let valid_rest = characters.all(|character| {
+        character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+    });
+    if !valid_first || !valid_rest || peer_name.len() > 32 {
+        return Err(PeerError::Validation {
+            detail: "peer_name must match [a-z0-9][a-z0-9-]{0,31}".to_string(),
+        });
+    }
+    Ok(peer_name.to_string())
+}
+
 fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -281,7 +318,7 @@ where
     info(
         title = "DN42 Autopeer API",
         description = "Automated peering setup and configuration API for DN42 networks.",
-        version = "1.1.0",
+        version = "2.0.0",
         contact(name = "DN42 Admin")
     ),
     paths(create_challenge, create_peer, update_peer, delete_peer),
@@ -307,20 +344,28 @@ mod tests {
     #[test]
     fn update_endpoint_distinguishes_missing_null_and_value() {
         let missing: UpdatePeerReq = serde_json::from_str(
-            r#"{"asn":4242420001,"pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","challenge":{"auth":"a","signature":"s","nonce":"n","expires_at":1}}"#,
+            r#"{"asn":4242420001,"peer_name":"fra1","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","challenge":{"auth":"a","signature":"s","nonce":"n","expires_at":1}}"#,
         )
         .unwrap();
         let null: UpdatePeerReq = serde_json::from_str(
-            r#"{"asn":4242420001,"pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":null,"challenge":{"auth":"a","signature":"s","nonce":"n","expires_at":1}}"#,
+            r#"{"asn":4242420001,"peer_name":"fra1","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":null,"challenge":{"auth":"a","signature":"s","nonce":"n","expires_at":1}}"#,
         )
         .unwrap();
         let value: UpdatePeerReq = serde_json::from_str(
-            r#"{"asn":4242420001,"pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":"198.51.100.1:51820","challenge":{"auth":"a","signature":"s","nonce":"n","expires_at":1}}"#,
+            r#"{"asn":4242420001,"peer_name":"fra1","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","endpoint":"198.51.100.1:51820","challenge":{"auth":"a","signature":"s","nonce":"n","expires_at":1}}"#,
         )
         .unwrap();
 
         assert_eq!(missing.endpoint, None);
         assert_eq!(null.endpoint, Some(None));
         assert_eq!(value.endpoint, Some(Some("198.51.100.1:51820".to_string())));
+    }
+
+    #[test]
+    fn peer_name_is_normalized_and_validated() {
+        assert_eq!(parse_peer_name(" fra1 ").unwrap(), "fra1");
+        assert!(parse_peer_name("FRA1").is_err());
+        assert!(parse_peer_name("fra_1").is_err());
+        assert!(parse_peer_name("").is_err());
     }
 }
