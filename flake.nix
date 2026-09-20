@@ -77,6 +77,8 @@
               check.enable = true;
               settings.hooks = {
                 nixfmt.enable = true;
+                rustfmt.enable = true;
+                cargo-sort.enable = true;
                 clippy = {
                   enable = true;
                   packageOverrides.cargo = pkgs.cargo;

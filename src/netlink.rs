@@ -52,7 +52,12 @@ impl WgManager {
         // Apply the up state on every call. This repairs a partial earlier attempt.
         handle
             .link()
-            .set(LinkUnspec::new_with_index(link.header.index).mtu(mtu as u32).up().build())
+            .set(
+                LinkUnspec::new_with_index(link.header.index)
+                    .mtu(mtu as u32)
+                    .up()
+                    .build(),
+            )
             .execute()
             .await
             .map_err(std::io::Error::other)

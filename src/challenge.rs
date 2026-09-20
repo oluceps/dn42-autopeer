@@ -245,7 +245,8 @@ pub fn build_create_message(
         "DN42-AUTOPEER-V3\noperation:create\nasn:{asn}\npeer_name:{peer_name}\npubkey:{pubkey}\nendpoint:{}\nlink_local:{}\nmtu:{}\nnonce:{nonce}\nexpires_at:{expires_at}",
         endpoint.unwrap_or("none"),
         link_local_message(link_local),
-        mtu.map(|m| m.to_string()).unwrap_or_else(|| "default".to_string())
+        mtu.map(|m| m.to_string())
+            .unwrap_or_else(|| "default".to_string())
     )
 }
 
@@ -324,7 +325,16 @@ mod tests {
             WgPubKey::try_from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()).unwrap();
         let create = build_create_message(4242420001, "fra1", &key, None, None, None, "nonce", 100);
         let update = build_update_message(4242420001, "fra1", &key, None, None, None, "nonce", 100);
-        let clear = build_update_message(4242420001, "fra1", &key, Some(None), None, None, "nonce", 100);
+        let clear = build_update_message(
+            4242420001,
+            "fra1",
+            &key,
+            Some(None),
+            None,
+            None,
+            "nonce",
+            100,
+        );
         let delete = build_delete_message(4242420001, "fra1", "nonce", 100);
         let other_peer = build_delete_message(4242420001, "sin1", "nonce", 100);
 

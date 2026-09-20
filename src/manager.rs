@@ -79,8 +79,15 @@ impl PeerManager {
 
         let peer = {
             let _port_guard = self.port_lock.lock().await;
-            self.reserve_peer(asn, peer_name, pubkey, endpoint, link_local, mtu.unwrap_or(1420))
-                .await?
+            self.reserve_peer(
+                asn,
+                peer_name,
+                pubkey,
+                endpoint,
+                link_local,
+                mtu.unwrap_or(1420),
+            )
+            .await?
         };
 
         if let Err(error) = self.apply_peer(&peer).await {

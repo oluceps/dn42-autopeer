@@ -182,7 +182,14 @@ pub async fn create_peer(
 
     let peer = state
         .manager
-        .create_peer(payload.asn, peer_name, payload.pubkey, endpoint, link_local, payload.mtu)
+        .create_peer(
+            payload.asn,
+            peer_name,
+            payload.pubkey,
+            endpoint,
+            link_local,
+            payload.mtu,
+        )
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -248,7 +255,14 @@ pub async fn update_peer(
 
     let peer = state
         .manager
-        .update_peer(payload.asn, peer_name, payload.pubkey, endpoint, link_local, payload.mtu)
+        .update_peer(
+            payload.asn,
+            peer_name,
+            payload.pubkey,
+            endpoint,
+            link_local,
+            payload.mtu,
+        )
         .await?;
     Ok(Json(PeerResponse {
         status: "success".to_string(),
