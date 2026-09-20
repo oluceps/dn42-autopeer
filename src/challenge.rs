@@ -2,7 +2,7 @@ use crate::{error::PeerError, persist::PeerStore, wg_pubkey::WgPubKey};
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
 use pgp::types::KeyDetails;
 use ssh_key::{PublicKey, SshSig};
-use std::{net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{net::Ipv6Addr, str::FromStr, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 use wireguard_control::Key;
 
@@ -234,13 +234,15 @@ pub fn build_create_message(
     asn: u32,
     peer_name: &str,
     pubkey: &WgPubKey,
-    endpoint: Option<SocketAddr>,
+    endpoint: Option<&str>,
+    link_local: Option<(Ipv6Addr, Ipv6Addr)>,
     nonce: &str,
     expires_at: i64,
 ) -> String {
     format!(
-        "DN42-AUTOPEER-V2\noperation:create\nasn:{asn}\npeer_name:{peer_name}\npubkey:{pubkey}\nendpoint:{}\nnonce:{nonce}\nexpires_at:{expires_at}",
-        endpoint.map_or_else(|| "none".to_string(), |value| value.to_string())
+        "DN42-AUTOPEER-V2\noperation:create\nasn:{asn}\npeer_name:{peer_name}\npubkey:{pubkey}\nendpoint:{}\nlink_local:{}\nnonce:{nonce}\nexpires_at:{expires_at}",
+        endpoint.unwrap_or("none"),
+        link_local_message(link_local)
     )
 }
 
@@ -248,7 +250,8 @@ pub fn build_update_message(
     asn: u32,
     peer_name: &str,
     pubkey: &WgPubKey,
-    endpoint: Option<Option<SocketAddr>>,
+    endpoint: Option<Option<&str>>,
+    link_local: Option<(Ipv6Addr, Ipv6Addr)>,
     nonce: &str,
     expires_at: i64,
 ) -> String {
@@ -258,8 +261,16 @@ pub fn build_update_message(
         Some(Some(value)) => format!("set:{value}"),
     };
     format!(
-        "DN42-AUTOPEER-V2\noperation:update\nasn:{asn}\npeer_name:{peer_name}\npubkey:{pubkey}\nendpoint:{endpoint}\nnonce:{nonce}\nexpires_at:{expires_at}"
+        "DN42-AUTOPEER-V2\noperation:update\nasn:{asn}\npeer_name:{peer_name}\npubkey:{pubkey}\nendpoint:{endpoint}\nlink_local:{}\nnonce:{nonce}\nexpires_at:{expires_at}",
+        link_local_message(link_local)
     )
+}
+
+fn link_local_message(link_local: Option<(Ipv6Addr, Ipv6Addr)>) -> String {
+    match link_local {
+        Some((local, remote)) => format!("manual:{local}:{remote}"),
+        None => "auto".to_string(),
+    }
 }
 
 pub fn build_delete_message(asn: u32, peer_name: &str, nonce: &str, expires_at: i64) -> String {
@@ -301,9 +312,9 @@ mod tests {
     fn signing_messages_bind_the_operation_and_endpoint_state() {
         let key =
             WgPubKey::try_from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()).unwrap();
-        let create = build_create_message(4242420001, "fra1", &key, None, "nonce", 100);
-        let update = build_update_message(4242420001, "fra1", &key, None, "nonce", 100);
-        let clear = build_update_message(4242420001, "fra1", &key, Some(None), "nonce", 100);
+        let create = build_create_message(4242420001, "fra1", &key, None, None, "nonce", 100);
+        let update = build_update_message(4242420001, "fra1", &key, None, None, "nonce", 100);
+        let clear = build_update_message(4242420001, "fra1", &key, Some(None), None, "nonce", 100);
         let delete = build_delete_message(4242420001, "fra1", "nonce", 100);
         let other_peer = build_delete_message(4242420001, "sin1", "nonce", 100);
 
@@ -312,6 +323,7 @@ mod tests {
         assert_ne!(clear, delete);
         assert_ne!(delete, other_peer);
         assert!(create.contains("peer_name:fra1"));
+        assert!(create.contains("link_local:auto"));
         assert!(create.contains("expires_at:100"));
     }
 }

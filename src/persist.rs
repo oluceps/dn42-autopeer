@@ -4,7 +4,7 @@ use crate::{
     wg_pubkey::WgPubKey,
 };
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
-use std::{env, net::SocketAddr, str::FromStr};
+use std::{env, str::FromStr};
 
 #[derive(Clone)]
 pub struct PeerStore {
@@ -134,7 +134,7 @@ impl PeerStore {
         .bind(&peer.peer_name)
         .bind(&peer.iface_name)
         .bind(peer.pubkey.as_str())
-        .bind(peer.endpoint.map(|value| value.to_string()))
+        .bind(peer.endpoint.as_deref())
         .bind(peer.local_ll_ip.to_string())
         .bind(peer.remote_ll_ip.to_string())
         .bind(peer.listen_port as i32)
@@ -172,7 +172,7 @@ impl PeerStore {
         .bind(peer.peer_id as i32)
         .bind(&peer.iface_name)
         .bind(peer.pubkey.as_str())
-        .bind(peer.endpoint.map(|value| value.to_string()))
+        .bind(peer.endpoint.as_deref())
         .bind(peer.local_ll_ip.to_string())
         .bind(peer.remote_ll_ip.to_string())
         .bind(peer.listen_port as i32)
@@ -253,13 +253,7 @@ fn row_to_peer(row: sqlx::postgres::PgRow) -> Result<Peer, PeerError> {
         detail: "The database contains an invalid ASN".to_string(),
     })?;
     let pubkey = WgPubKey::try_from(row.get::<String, _>("pubkey"))?;
-    let endpoint = row
-        .get::<Option<String>, _>("endpoint")
-        .map(|value| value.parse::<SocketAddr>())
-        .transpose()
-        .map_err(|_| PeerError::Validation {
-            detail: format!("The database contains an invalid endpoint for AS{asn}"),
-        })?;
+    let endpoint = row.get::<Option<String>, _>("endpoint");
     let local_ll_ip =
         row.get::<String, _>("local_ll_ip")
             .parse()

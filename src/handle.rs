@@ -1,7 +1,8 @@
 use crate::{challenge::RequestAuthorizer, error::ErrorResponse, wg_pubkey::WgPubKey};
 use axum::{Json, extract::State, http::StatusCode};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::{net::SocketAddr, str::FromStr, sync::Arc};
+use std::{net::Ipv6Addr, sync::Arc};
+use url::{Host, Url};
 use utoipa::{OpenApi, ToSchema};
 
 use crate::error::PeerError;
@@ -40,8 +41,12 @@ pub struct CreatePeerReq {
     pub peer_name: String,
     #[schema(example = "xyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyz=", value_type = String)]
     pub pubkey: WgPubKey,
-    #[schema(example = "198.51.100.1:51820")]
+    #[schema(example = "peer.example.net:51820")]
     pub endpoint: Option<String>,
+    #[serde(default)]
+    pub manual_lla: bool,
+    pub local_ll_ip: Option<String>,
+    pub remote_ll_ip: Option<String>,
     pub challenge: Challenge,
 }
 
@@ -54,8 +59,12 @@ pub struct UpdatePeerReq {
     #[schema(example = "xyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyz=", value_type = String)]
     pub pubkey: WgPubKey,
     #[serde(default, deserialize_with = "deserialize_present_option")]
-    #[schema(value_type = Option<String>, nullable = true, example = "198.51.100.1:51820")]
+    #[schema(value_type = Option<String>, nullable = true, example = "peer.example.net:51820")]
     pub endpoint: Option<Option<String>>,
+    #[serde(default)]
+    pub manual_lla: bool,
+    pub local_ll_ip: Option<String>,
+    pub remote_ll_ip: Option<String>,
     pub challenge: Challenge,
 }
 
@@ -146,11 +155,17 @@ pub async fn create_peer(
 ) -> Result<(StatusCode, Json<PeerResponse>), PeerError> {
     let peer_name = parse_peer_name(&payload.peer_name)?;
     let endpoint = parse_endpoint(payload.endpoint.as_deref())?;
+    let link_local = parse_link_local(
+        payload.manual_lla,
+        payload.local_ll_ip.as_deref(),
+        payload.remote_ll_ip.as_deref(),
+    )?;
     let message = crate::challenge::build_create_message(
         payload.asn,
         &peer_name,
         &payload.pubkey,
-        endpoint,
+        endpoint.as_deref(),
+        link_local,
         &payload.challenge.nonce,
         payload.challenge.expires_at,
     );
@@ -158,7 +173,7 @@ pub async fn create_peer(
 
     let peer = state
         .manager
-        .create_peer(payload.asn, peer_name, payload.pubkey, endpoint)
+        .create_peer(payload.asn, peer_name, payload.pubkey, endpoint, link_local)
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -205,11 +220,17 @@ pub async fn update_peer(
         .as_ref()
         .map(|value| parse_endpoint(value.as_deref()))
         .transpose()?;
+    let link_local = parse_link_local(
+        payload.manual_lla,
+        payload.local_ll_ip.as_deref(),
+        payload.remote_ll_ip.as_deref(),
+    )?;
     let message = crate::challenge::build_update_message(
         payload.asn,
         &peer_name,
         &payload.pubkey,
-        endpoint,
+        endpoint.as_ref().map(|value| value.as_deref()),
+        link_local,
         &payload.challenge.nonce,
         payload.challenge.expires_at,
     );
@@ -217,7 +238,7 @@ pub async fn update_peer(
 
     let peer = state
         .manager
-        .update_peer(payload.asn, peer_name, payload.pubkey, endpoint)
+        .update_peer(payload.asn, peer_name, payload.pubkey, endpoint, link_local)
         .await?;
     Ok(Json(PeerResponse {
         status: "success".to_string(),
@@ -283,13 +304,77 @@ async fn authorize(
         .await
 }
 
-fn parse_endpoint(endpoint: Option<&str>) -> Result<Option<SocketAddr>, PeerError> {
-    endpoint
-        .map(SocketAddr::from_str)
-        .transpose()
+fn parse_endpoint(endpoint: Option<&str>) -> Result<Option<String>, PeerError> {
+    endpoint.map(parse_endpoint_value).transpose()
+}
+
+fn parse_endpoint_value(endpoint: &str) -> Result<String, PeerError> {
+    let endpoint = endpoint.trim();
+    let url = Url::parse(&format!("udp://{endpoint}")).map_err(|_| PeerError::Validation {
+        detail: "The endpoint must use the HOST:PORT format".to_string(),
+    })?;
+    if url.username() != ""
+        || url.password().is_some()
+        || !url.path().is_empty()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(PeerError::Validation {
+            detail: "The endpoint must use the HOST:PORT format".to_string(),
+        });
+    }
+    let port = url.port().ok_or_else(|| PeerError::Validation {
+        detail: "The endpoint must include a port".to_string(),
+    })?;
+    let host = url.host().ok_or_else(|| PeerError::Validation {
+        detail: "The endpoint must include an IP address or hostname".to_string(),
+    })?;
+    Ok(match host {
+        Host::Domain(host) => format!("{}:{port}", host.to_ascii_lowercase()),
+        Host::Ipv4(host) => format!("{host}:{port}"),
+        Host::Ipv6(host) => format!("[{host}]:{port}"),
+    })
+}
+
+fn parse_link_local(
+    manual_lla: bool,
+    local_ll_ip: Option<&str>,
+    remote_ll_ip: Option<&str>,
+) -> Result<Option<(Ipv6Addr, Ipv6Addr)>, PeerError> {
+    if !manual_lla {
+        if local_ll_ip.is_some() || remote_ll_ip.is_some() {
+            return Err(PeerError::Validation {
+                detail: "local_ll_ip and remote_ll_ip require manual_lla=true".to_string(),
+            });
+        }
+        return Ok(None);
+    }
+    let local = parse_link_local_address("local_ll_ip", local_ll_ip)?;
+    let remote = parse_link_local_address("remote_ll_ip", remote_ll_ip)?;
+    if local == remote {
+        return Err(PeerError::Validation {
+            detail: "local_ll_ip and remote_ll_ip must differ".to_string(),
+        });
+    }
+    Ok(Some((local, remote)))
+}
+
+fn parse_link_local_address(name: &str, value: Option<&str>) -> Result<Ipv6Addr, PeerError> {
+    let address = value
+        .ok_or_else(|| PeerError::Validation {
+            detail: format!("{name} is required when manual_lla=true"),
+        })?
+        .trim()
+        .parse::<Ipv6Addr>()
         .map_err(|_| PeerError::Validation {
-            detail: "The endpoint must use the IP:PORT format".to_string(),
-        })
+            detail: format!("{name} must be a valid IPv6 address"),
+        })?;
+    if !address.is_unicast_link_local() {
+        return Err(PeerError::Validation {
+            detail: format!("{name} must be an IPv6 link-local address"),
+        });
+    }
+    Ok(address)
 }
 
 fn parse_peer_name(peer_name: &str) -> Result<String, PeerError> {
@@ -371,5 +456,31 @@ mod tests {
         assert!(parse_peer_name("FRA1").is_err());
         assert!(parse_peer_name("fra_1").is_err());
         assert!(parse_peer_name("").is_err());
+    }
+
+    #[test]
+    fn endpoint_accepts_hostnames_and_normalizes_addresses() {
+        assert_eq!(
+            parse_endpoint(Some("Peer.Example.NET:51820")).unwrap(),
+            Some("peer.example.net:51820".to_string())
+        );
+        assert_eq!(
+            parse_endpoint(Some("[2001:db8::1]:51820")).unwrap(),
+            Some("[2001:db8::1]:51820".to_string())
+        );
+        assert!(parse_endpoint(Some("peer.example.net")).is_err());
+        assert!(parse_endpoint(Some("https://peer.example.net:51820")).is_err());
+    }
+
+    #[test]
+    fn link_local_addresses_require_manual_mode() {
+        let pair = parse_link_local(true, None, None);
+        assert!(pair.is_err());
+        assert_eq!(parse_link_local(false, None, None).unwrap(), None);
+        assert!(parse_link_local(false, Some("fe80::1"), None).is_err());
+        assert_eq!(
+            parse_link_local(true, Some("fe80::1"), Some("fe80::2")).unwrap(),
+            Some(("fe80::1".parse().unwrap(), "fe80::2".parse().unwrap()))
+        );
     }
 }

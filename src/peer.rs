@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::Ipv6Addr;
 
 use crate::wg_pubkey::WgPubKey;
 
@@ -17,7 +17,7 @@ pub struct Peer {
     // wireguard public key in base64
     pub pubkey: WgPubKey,
     // remote endpoint, optional for roaming peers
-    pub endpoint: Option<SocketAddr>,
+    pub endpoint: Option<String>,
     // the local ipv6 link-local address assigned to our side of the wg interface
     pub local_ll_ip: Ipv6Addr,
     // the remote ipv6 link-local address used for the bgp session

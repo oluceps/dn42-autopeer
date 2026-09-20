@@ -15,10 +15,11 @@ use std::{
     net::{Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixStream,
+    net::{UnixStream, lookup_host},
     sync::Mutex,
 };
 
@@ -62,7 +63,8 @@ impl PeerManager {
         asn: u32,
         peer_name: String,
         pubkey: WgPubKey,
-        endpoint: Option<SocketAddr>,
+        endpoint: Option<String>,
+        link_local: Option<(Ipv6Addr, Ipv6Addr)>,
     ) -> Result<Peer, PeerError> {
         let operation_lock = self.operation_lock(asn, &peer_name);
         let _operation_guard = operation_lock.lock().await;
@@ -72,7 +74,8 @@ impl PeerManager {
 
         let peer = {
             let _port_guard = self.port_lock.lock().await;
-            self.reserve_peer(asn, peer_name, pubkey, endpoint).await?
+            self.reserve_peer(asn, peer_name, pubkey, endpoint, link_local)
+                .await?
         };
 
         if let Err(error) = self.apply_peer(&peer).await {
@@ -96,7 +99,8 @@ impl PeerManager {
         asn: u32,
         peer_name: String,
         pubkey: WgPubKey,
-        endpoint: Option<Option<SocketAddr>>,
+        endpoint: Option<Option<String>>,
+        link_local: Option<(Ipv6Addr, Ipv6Addr)>,
     ) -> Result<Peer, PeerError> {
         let operation_lock = self.operation_lock(asn, &peer_name);
         let _operation_guard = operation_lock.lock().await;
@@ -114,7 +118,9 @@ impl PeerManager {
 
         let desired_peer = Peer {
             pubkey,
-            endpoint: endpoint.unwrap_or(old_peer.endpoint),
+            endpoint: endpoint.unwrap_or_else(|| old_peer.endpoint.clone()),
+            local_ll_ip: link_local.map_or_else(|| asn_link_local(self.local_asn), |value| value.0),
+            remote_ll_ip: link_local.map_or_else(|| asn_link_local(asn), |value| value.1),
             status: PeerStatus::Provisioning,
             ..old_peer.clone()
         };
@@ -206,7 +212,8 @@ impl PeerManager {
         asn: u32,
         peer_name: String,
         pubkey: WgPubKey,
-        endpoint: Option<SocketAddr>,
+        endpoint: Option<String>,
+        link_local: Option<(Ipv6Addr, Ipv6Addr)>,
     ) -> Result<Peer, PeerError> {
         let peer_id = self.db.allocate_peer_id().await?;
         let preferred_offset = asn % 10_000;
@@ -222,7 +229,8 @@ impl PeerManager {
                 asn,
                 peer_name.clone(),
                 pubkey.clone(),
-                endpoint,
+                endpoint.clone(),
+                link_local,
                 listen_port,
             );
             if self.db.reserve_peer(&peer).await? {
@@ -243,7 +251,8 @@ impl PeerManager {
         asn: u32,
         peer_name: String,
         pubkey: WgPubKey,
-        endpoint: Option<SocketAddr>,
+        endpoint: Option<String>,
+        link_local: Option<(Ipv6Addr, Ipv6Addr)>,
         listen_port: u16,
     ) -> Peer {
         Peer {
@@ -253,8 +262,8 @@ impl PeerManager {
             asn,
             pubkey,
             endpoint,
-            local_ll_ip: asn_link_local(self.local_asn),
-            remote_ll_ip: asn_link_local(asn),
+            local_ll_ip: link_local.map_or_else(|| asn_link_local(self.local_asn), |value| value.0),
+            remote_ll_ip: link_local.map_or_else(|| asn_link_local(asn), |value| value.1),
             status: PeerStatus::Provisioning,
             listen_port,
         }
@@ -262,12 +271,16 @@ impl PeerManager {
 
     async fn apply_peer(&self, peer: &Peer) -> Result<(), PeerError> {
         WgManager::ensure_wg_interface(&peer.iface_name).await?;
+        let endpoint = match peer.endpoint.as_deref() {
+            Some(endpoint) => Some(resolve_endpoint(endpoint).await?),
+            None => None,
+        };
         WgManager::configure_peer(
             &peer.iface_name,
             &self.local_wg_privkey,
             peer.listen_port,
             &peer.pubkey,
-            peer.endpoint,
+            endpoint,
         )?;
         WgManager::configure_local_address(&peer.iface_name, peer.local_ll_ip).await?;
         self.install_bird_config(peer).await
@@ -474,6 +487,23 @@ impl PeerManager {
     fn config_path(&self, iface_name: &str) -> PathBuf {
         Path::new(&self.bird_conf_dir).join(format!("{iface_name}.conf"))
     }
+}
+
+async fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, PeerError> {
+    let addresses = tokio::time::timeout(Duration::from_secs(5), lookup_host(endpoint))
+        .await
+        .map_err(|_| PeerError::Validation {
+            detail: format!("DNS lookup timed out for endpoint {endpoint}"),
+        })?
+        .map_err(|_| PeerError::Validation {
+            detail: format!("DNS lookup failed for endpoint {endpoint}"),
+        })?;
+    addresses
+        .into_iter()
+        .next()
+        .ok_or_else(|| PeerError::Validation {
+            detail: format!("DNS lookup returned no addresses for endpoint {endpoint}"),
+        })
 }
 
 fn asn_link_local(asn: u32) -> Ipv6Addr {
