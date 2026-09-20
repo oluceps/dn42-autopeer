@@ -67,41 +67,66 @@ The challenge expires after five minutes.
 ### Build the signed message
 
 Use these exact UTF-8 formats without a final newline.
-The server normalizes each endpoint through `SocketAddr` before it builds the message.
+The V3 signature covers the endpoint, link-local mode, link-local addresses, and MTU.
+
+An endpoint uses `HOST:PORT`.
+The host can be a hostname, an IPv4 address, or a bracketed IPv6 address.
+The server converts hostnames to lowercase and writes IPv6 addresses in bracketed form before it builds the signing message.
 
 Create:
 
 ```text
-DN42-AUTOPEER-V2
+DN42-AUTOPEER-V3
 operation:create
 asn:<asn>
 peer_name:<peer-name>
 pubkey:<wireguard-public-key>
-endpoint:<normalized-IP:PORT-or-none>
+endpoint:<normalized-HOST:PORT-or-none>
+link_local:<auto-or-manual:nyaw-ip:user-ip>
+mtu:<default-or-number>
 nonce:<nonce>
 expires_at:<unix-timestamp>
 ```
 
-Update with a new endpoint:
+Update:
 
 ```text
-DN42-AUTOPEER-V2
+DN42-AUTOPEER-V3
 operation:update
 asn:<asn>
 peer_name:<peer-name>
 pubkey:<wireguard-public-key>
-endpoint:set:<normalized-IP:PORT>
+endpoint:<unchanged-or-clear-or-set:normalized-HOST:PORT>
+link_local:<auto-or-manual:nyaw-ip:user-ip>
+mtu:<unchanged-or-default-or-set:number>
 nonce:<nonce>
 expires_at:<unix-timestamp>
 ```
 
 For an update, use `endpoint:unchanged` when the JSON field is absent.
 Use `endpoint:clear` when the JSON field is `null`.
+Use `endpoint:set:<normalized-HOST:PORT>` when the field contains a value.
+
+Automatic link-local addressing uses `link_local:auto`.
+The server assigns `fe80::fcde:3243` to the Nyaw interface.
+It assigns `fe80::(ASN >> 16):(ASN & 0xffff)` to the user's interface.
+
+Set `manual_lla` to `true` to choose both addresses.
+Then set `local_ll_ip` to the Nyaw address and `remote_ll_ip` to the user's address.
+Both values must be distinct IPv6 link-local addresses.
+The signing message uses `link_local:manual:<local_ll_ip>:<remote_ll_ip>`.
+An update with `manual_lla=false` selects automatic addresses.
+It does not retain custom addresses.
+
+For create, an omitted or null MTU selects 1420 and signs `mtu:default`.
+For update, an omitted MTU keeps the current value and signs `mtu:unchanged`.
+A null MTU resets it to 1420 and signs `mtu:default`.
+A numeric MTU replaces it and signs `mtu:set:<value>`.
 
 Delete:
 
 ```text
-DN42-AUTOPEER-V2
+DN42-AUTOPEER-V3
 operation:delete
 asn:<asn>
 peer_name:<peer-name>
@@ -123,7 +148,9 @@ Also put the registered public key, nonce, and expiration value in `challenge`.
   "asn": 4242421234,
   "peer_name": "fra1",
   "pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-  "endpoint": "198.51.100.1:51820",
+  "endpoint": "peer.example.net:51820",
+  "manual_lla": false,
+  "mtu": 1420,
   "challenge": {
     "auth": "ssh-ed25519 registered-maintainer-key",
     "signature": "-----BEGIN SSH SIGNATURE-----\n...",
@@ -147,15 +174,22 @@ Create, update, and delete requests use the ASN and peer name as the public iden
 The preferred listen port is `20000 + (ASN % 10000)`.
 The service checks PostgreSQL and existing WireGuard interfaces for conflicts.
 It increments the port until it finds an available value, then stores that value.
+The endpoint is optional and can contain an IP address or hostname.
+The default MTU is 1420.
+Automatic link-local addresses follow the mapping above.
 
 ### Update a peer
 
-`PATCH /api/peers` can replace the WireGuard public key and endpoint.
+`PATCH /api/peers` can replace the WireGuard public key, endpoint, link-local addresses, and MTU.
 The service replaces the complete kernel peer list, so an old public key stops working.
 The ASN and peer name select the machine to update.
 
 An absent `endpoint` field keeps the current endpoint.
 An `endpoint` value of `null` clears it.
+An absent `mtu` field keeps the current MTU.
+An `mtu` value of `null` resets it to 1420.
+Set `manual_lla=true` and supply both address fields to use custom addresses.
+Otherwise, the update selects the automatic addresses.
 
 ### Delete a peer
 

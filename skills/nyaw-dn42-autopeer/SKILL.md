@@ -21,9 +21,19 @@ Get the operation, ASN, peer name, and registered maintainer authentication meth
 Use a different peer name for each machine under one ASN.
 Use the same peer name for later update or delete requests.
 The peer name must match `[a-z0-9][a-z0-9-]{0,31}`.
-For create or update, also get a WireGuard public key and the endpoint choice.
+For create or update, also get a WireGuard public key, endpoint choice, link-local mode, and MTU choice.
 If the user has no WireGuard key pair, generate and save one locally.
-An endpoint must use `IP:PORT`. Put brackets around an IPv6 address.
+An endpoint must use `HOST:PORT`.
+The host can be a hostname, an IPv4 address, or a bracketed IPv6 address.
+Convert a hostname to lowercase before signing it.
+
+Automatic link-local addressing assigns `fe80::fcde:3243` to Nyaw.
+It assigns `fe80::(ASN >> 16):(ASN & 0xffff)` to the user.
+For manual addressing, get two distinct IPv6 link-local addresses.
+The API fields use the server viewpoint: `local_ll_ip` is Nyaw and `remote_ll_ip` is the user.
+
+The default MTU is 1420.
+For update, distinguish an omitted MTU from a JSON `null` and a numeric value.
 
 ## Run the workflow
 
@@ -50,36 +60,54 @@ Use a JSON serializer when you add the multiline public key and signature to the
 Create:
 
 ```text
-DN42-AUTOPEER-V2
+DN42-AUTOPEER-V3
 operation:create
 asn:<asn>
 peer_name:<peer-name>
 pubkey:<wireguard-public-key>
-endpoint:<normalized-IP:PORT-or-none>
+endpoint:<normalized-HOST:PORT-or-none>
+link_local:<auto-or-manual:nyaw-ip:user-ip>
+mtu:<default-or-number>
 nonce:<nonce>
 expires_at:<unix-timestamp>
 ```
 
+For create, omit the JSON `endpoint` field to use `endpoint:none`.
+Use `manual_lla=false` and omit both address fields to use `link_local:auto`.
+Use `manual_lla=true` with both address fields to use the manual form.
+An omitted or null MTU selects 1420 and uses `mtu:default`.
+
 Update:
 
 ```text
-DN42-AUTOPEER-V2
+DN42-AUTOPEER-V3
 operation:update
 asn:<asn>
 peer_name:<peer-name>
 pubkey:<wireguard-public-key>
-endpoint:<unchanged-or-clear-or-set:normalized-IP:PORT>
+endpoint:<unchanged-or-clear-or-set:normalized-HOST:PORT>
+link_local:<auto-or-manual:nyaw-ip:user-ip>
+mtu:<unchanged-or-default-or-set:number>
 nonce:<nonce>
 expires_at:<unix-timestamp>
 ```
 
 Omit the JSON `endpoint` field to keep it unchanged.
 Set that field to `null` to clear it.
+Supply a value to use `endpoint:set:<normalized-HOST:PORT>`.
+
+Use `manual_lla=false` to select automatic addresses during an update.
+This does not retain prior custom addresses.
+Use `manual_lla=true` with both address fields to replace them.
+
+Omit the JSON `mtu` field to keep it unchanged.
+Set that field to `null` to reset it to 1420.
+Supply a number to use `mtu:set:<value>`.
 
 Delete:
 
 ```text
-DN42-AUTOPEER-V2
+DN42-AUTOPEER-V3
 operation:delete
 asn:<asn>
 peer_name:<peer-name>
