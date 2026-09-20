@@ -1,7 +1,10 @@
 use crate::error::{NetlinkSnafu, PeerError};
 use crate::wg_pubkey::WgPubKey;
 use futures::StreamExt;
-use rtnetlink::{LinkUnspec, LinkWireguard, new_connection};
+use rtnetlink::{
+    Handle, LinkUnspec, LinkWireguard, new_connection,
+    packet_route::link::{LinkAttribute, LinkMessage},
+};
 use snafu::ResultExt;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
@@ -21,17 +24,7 @@ impl WgManager {
             .context(NetlinkSnafu { iface_name })?;
         tokio::spawn(connection);
 
-        let mut links = handle
-            .link()
-            .get()
-            .match_name(iface_name.to_string())
-            .execute();
-        let existing = links
-            .next()
-            .await
-            .transpose()
-            .map_err(std::io::Error::other)
-            .context(NetlinkSnafu { iface_name })?;
+        let existing = find_link(&handle, iface_name).await?;
 
         if existing.is_none() {
             handle
@@ -46,17 +39,8 @@ impl WgManager {
             Device::get(&interface_name, Backend::Kernel).context(NetlinkSnafu { iface_name })?;
         }
 
-        let mut links = handle
-            .link()
-            .get()
-            .match_name(iface_name.to_string())
-            .execute();
-        let link = links
-            .next()
-            .await
-            .transpose()
-            .map_err(std::io::Error::other)
-            .context(NetlinkSnafu { iface_name })?
+        let link = find_link(&handle, iface_name)
+            .await?
             .ok_or_else(|| PeerError::Netlink {
                 source: std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -90,17 +74,8 @@ impl WgManager {
             .context(NetlinkSnafu { iface_name })?;
         tokio::spawn(connection);
 
-        let mut links = handle
-            .link()
-            .get()
-            .match_name(iface_name.to_string())
-            .execute();
-        let link = links
-            .next()
-            .await
-            .transpose()
-            .map_err(std::io::Error::other)
-            .context(NetlinkSnafu { iface_name })?
+        let link = find_link(&handle, iface_name)
+            .await?
             .ok_or_else(|| PeerError::Netlink {
                 source: std::io::Error::new(std::io::ErrorKind::NotFound, "Interface not found"),
                 iface_name: iface_name.to_string(),
@@ -192,18 +167,7 @@ impl WgManager {
             .context(NetlinkSnafu { iface_name })?;
         tokio::spawn(connection);
 
-        let mut links = handle
-            .link()
-            .get()
-            .match_name(iface_name.to_string())
-            .execute();
-        match links
-            .next()
-            .await
-            .transpose()
-            .map_err(std::io::Error::other)
-            .context(NetlinkSnafu { iface_name })?
-        {
+        match find_link(&handle, iface_name).await? {
             Some(link) => handle
                 .link()
                 .del(link.header.index)
@@ -216,8 +180,45 @@ impl WgManager {
     }
 }
 
+async fn find_link(handle: &Handle, iface_name: &str) -> Result<Option<LinkMessage>, PeerError> {
+    let mut links = handle.link().get().execute();
+    while let Some(link) = links.next().await {
+        let link = link
+            .map_err(std::io::Error::other)
+            .context(NetlinkSnafu { iface_name })?;
+        if link
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, LinkAttribute::IfName(name) if name == iface_name))
+        {
+            return Ok(Some(link));
+        }
+    }
+    Ok(None)
+}
+
 fn parse_interface_name(iface_name: &str) -> Result<InterfaceName, PeerError> {
     InterfaceName::from_str(iface_name).map_err(|_| PeerError::Validation {
         detail: "The interface name is invalid".to_string(),
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires access to the host Netlink socket"]
+    async fn link_dump_distinguishes_existing_and_missing_interfaces() {
+        let (connection, handle, _) = new_connection().unwrap();
+        tokio::spawn(connection);
+
+        assert!(find_link(&handle, "lo").await.unwrap().is_some());
+        assert!(
+            find_link(&handle, "missing-autopeer-link")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }

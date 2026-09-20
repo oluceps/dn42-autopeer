@@ -60,7 +60,13 @@ in
     systemd.services.autopeer = {
       description = "DN42 Autopeer Web Server";
       after = [
-        "network.target"
+        "network-online.target"
+        "bird.service"
+        "postgresql.service"
+      ];
+      wants = [
+        "network-online.target"
+        "bird.service"
       ];
       wantedBy = [ "multi-user.target" ];
 

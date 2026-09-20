@@ -179,28 +179,39 @@ impl PeerManager {
     }
 
     pub async fn recover(&self) -> Result<(), PeerError> {
-        for peer in self.db.list_peers().await? {
+        let peers = self.db.list_peers().await?;
+
+        for peer in peers.iter().filter(|peer| {
+            peer.status != PeerStatus::Deleting && peer.status != PeerStatus::Disabled
+        }) {
+            self.apply_wireguard(peer).await?;
+        }
+
+        for peer in peers
+            .iter()
+            .filter(|peer| peer.status == PeerStatus::Deleting)
+        {
             let operation_lock = self.operation_lock(peer.asn, &peer.peer_name);
             let _operation_guard = operation_lock.lock().await;
-            if peer.status == PeerStatus::Deleting {
-                self.remove_external_state(&peer).await?;
-                if !self.db.delete_peer(peer.peer_id).await? {
-                    return Err(PeerError::NotFound {
-                        asn: peer.asn,
-                        peer_name: peer.peer_name,
-                    });
-                }
-                continue;
+            self.remove_external_state(peer).await?;
+            if !self.db.delete_peer(peer.peer_id).await? {
+                return Err(PeerError::NotFound {
+                    asn: peer.asn,
+                    peer_name: peer.peer_name.clone(),
+                });
             }
-            if peer.status == PeerStatus::Disabled {
-                continue;
-            }
+        }
 
-            self.apply_peer(&peer).await?;
+        for peer in peers.iter().filter(|peer| {
+            peer.status != PeerStatus::Deleting && peer.status != PeerStatus::Disabled
+        }) {
+            let operation_lock = self.operation_lock(peer.asn, &peer.peer_name);
+            let _operation_guard = operation_lock.lock().await;
+            self.install_bird_config(peer).await?;
             if !self.db.set_status(peer.peer_id, PeerStatus::Active).await? {
                 return Err(PeerError::NotFound {
                     asn: peer.asn,
-                    peer_name: peer.peer_name,
+                    peer_name: peer.peer_name.clone(),
                 });
             }
         }
@@ -217,6 +228,8 @@ impl PeerManager {
     ) -> Result<Peer, PeerError> {
         let peer_id = self.db.allocate_peer_id().await?;
         let preferred_offset = asn % 10_000;
+        let link_local =
+            link_local.unwrap_or_else(|| (asn_link_local(self.local_asn), asn_link_local(asn)));
         for increment in 0..10_000_u32 {
             let offset = (preferred_offset + increment) % 10_000;
             let listen_port = 20_000 + offset as u16;
@@ -224,7 +237,7 @@ impl PeerManager {
                 continue;
             }
 
-            let peer = self.build_peer(
+            let peer = Self::build_peer(
                 peer_id,
                 asn,
                 peer_name.clone(),
@@ -246,13 +259,12 @@ impl PeerManager {
     }
 
     fn build_peer(
-        &self,
         peer_id: u32,
         asn: u32,
         peer_name: String,
         pubkey: WgPubKey,
         endpoint: Option<String>,
-        link_local: Option<(Ipv6Addr, Ipv6Addr)>,
+        link_local: (Ipv6Addr, Ipv6Addr),
         listen_port: u16,
     ) -> Peer {
         Peer {
@@ -262,14 +274,19 @@ impl PeerManager {
             asn,
             pubkey,
             endpoint,
-            local_ll_ip: link_local.map_or_else(|| asn_link_local(self.local_asn), |value| value.0),
-            remote_ll_ip: link_local.map_or_else(|| asn_link_local(asn), |value| value.1),
+            local_ll_ip: link_local.0,
+            remote_ll_ip: link_local.1,
             status: PeerStatus::Provisioning,
             listen_port,
         }
     }
 
     async fn apply_peer(&self, peer: &Peer) -> Result<(), PeerError> {
+        self.apply_wireguard(peer).await?;
+        self.install_bird_config(peer).await
+    }
+
+    async fn apply_wireguard(&self, peer: &Peer) -> Result<(), PeerError> {
         WgManager::ensure_wg_interface(&peer.iface_name).await?;
         let endpoint = match peer.endpoint.as_deref() {
             Some(endpoint) => Some(resolve_endpoint(endpoint).await?),
@@ -283,7 +300,7 @@ impl PeerManager {
             endpoint,
         )?;
         WgManager::configure_local_address(&peer.iface_name, peer.local_ll_ip).await?;
-        self.install_bird_config(peer).await
+        Ok(())
     }
 
     async fn compensate_failed_create(&self, peer: &Peer) {
@@ -420,6 +437,15 @@ impl PeerManager {
             return Ok(());
         }
 
+        match tokio::time::timeout(Duration::from_secs(10), self.reload_bird_inner()).await {
+            Ok(result) => result,
+            Err(_) => Err(PeerError::BirdReload {
+                stderr: "BIRD did not respond within 10 seconds".to_string(),
+            }),
+        }
+    }
+
+    async fn reload_bird_inner(&self) -> Result<(), PeerError> {
         let mut stream = UnixStream::connect(&self.bird_socket)
             .await
             .map_err(|source| PeerError::BirdConfigIo {
