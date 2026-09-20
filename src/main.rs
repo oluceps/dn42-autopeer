@@ -4,6 +4,7 @@ use axum::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -63,6 +64,19 @@ async fn main() {
         .recover()
         .await
         .expect("Failed to recover peer state");
+
+    let nft_reconciler = Arc::clone(&peer_manager);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = nft_reconciler.sync_nft_ports().await {
+                eprintln!("Could not synchronize nftables ports: {error}");
+            }
+        }
+    });
 
     let state = AppState {
         manager: peer_manager,

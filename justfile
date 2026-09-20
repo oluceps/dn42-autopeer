@@ -44,7 +44,7 @@ test-api:
     sleep 1sec
     
     # We use cargo run to compile and start the server inside the container environment.
-    bash -c 'env MOCK_NETLINK="1" MOCK_BIRD="1" REGISTRY_API_URL="http://127.0.0.1:8081" BIRD_CONF_DIR="/tmp/dn42-peers-test" WG_PRIVATE_KEY="+PVguD/ohXxye8Uv/Cod9OZycB6vh/dYOrghsFxcdWc=" WG_PUBLIC_KEY="8qUHVC+K2PNZyMYB5O5EOyg/egpEVbutAZ7VSLxGN1Q=" cargo run > /tmp/autopeer_test.log 2>&1 &'
+    bash -c 'env MOCK_NETLINK="1" MOCK_BIRD="1" MOCK_NFTABLES="1" REGISTRY_API_URL="http://127.0.0.1:8081" BIRD_CONF_DIR="/tmp/dn42-peers-test" WG_PRIVATE_KEY="+PVguD/ohXxye8Uv/Cod9OZycB6vh/dYOrghsFxcdWc=" WG_PUBLIC_KEY="8qUHVC+K2PNZyMYB5O5EOyg/egpEVbutAZ7VSLxGN1Q=" cargo run > /tmp/autopeer_test.log 2>&1 &'
     
     # Wait for the server to initialize and bind the port
     sleep 3sec

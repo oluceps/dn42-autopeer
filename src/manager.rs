@@ -14,12 +14,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::{
     net::{Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
+    process::Stdio,
     sync::Arc,
     time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixStream, lookup_host},
+    process::Command,
     sync::Mutex,
 };
 
@@ -33,6 +35,7 @@ pub struct PeerManager {
     pub local_asn: u32,
     mutation_locks: DashMap<(u32, String), Arc<Mutex<()>>>,
     port_lock: Mutex<()>,
+    nft_sync_lock: Mutex<()>,
 }
 
 impl PeerManager {
@@ -55,6 +58,7 @@ impl PeerManager {
             local_asn,
             mutation_locks: DashMap::new(),
             port_lock: Mutex::new(()),
+            nft_sync_lock: Mutex::new(()),
         }
     }
 
@@ -82,11 +86,23 @@ impl PeerManager {
             self.compensate_failed_create(&peer).await;
             return Err(error);
         }
-        if !self.db.set_status(peer.peer_id, PeerStatus::Active).await? {
-            return Err(PeerError::NotFound {
-                asn,
-                peer_name: peer.peer_name,
-            });
+        if let Err(error) = self.sync_nft_ports().await {
+            self.compensate_failed_create(&peer).await;
+            return Err(error);
+        }
+        match self.db.set_status(peer.peer_id, PeerStatus::Active).await {
+            Ok(true) => {}
+            Ok(false) => {
+                self.compensate_failed_create(&peer).await;
+                return Err(PeerError::NotFound {
+                    asn,
+                    peer_name: peer.peer_name,
+                });
+            }
+            Err(error) => {
+                self.compensate_failed_create(&peer).await;
+                return Err(error);
+            }
         }
         Ok(Peer {
             status: PeerStatus::Active,
@@ -164,9 +180,20 @@ impl PeerManager {
             return Err(PeerError::NotFound { asn, peer_name });
         }
 
+        if let Err(error) = self.sync_nft_ports().await {
+            let _ = self.db.set_status(peer.peer_id, PeerStatus::Active).await;
+            return Err(error);
+        }
+
         if let Err(error) = self.remove_external_state(&peer).await {
-            if self.apply_peer(&peer).await.is_ok() {
-                let _ = self.db.set_status(peer.peer_id, PeerStatus::Active).await;
+            if self.apply_peer(&peer).await.is_ok()
+                && self
+                    .db
+                    .set_status(peer.peer_id, PeerStatus::Active)
+                    .await
+                    .is_ok()
+            {
+                let _ = self.sync_nft_ports().await;
             }
             return Err(error);
         }
@@ -186,6 +213,8 @@ impl PeerManager {
         }) {
             self.apply_wireguard(peer).await?;
         }
+
+        self.sync_nft_ports().await?;
 
         for peer in peers
             .iter()
@@ -216,6 +245,23 @@ impl PeerManager {
             }
         }
         Ok(())
+    }
+
+    pub async fn sync_nft_ports(&self) -> Result<(), PeerError> {
+        let _guard = self.nft_sync_lock.lock().await;
+        let mut ports = self
+            .db
+            .list_peers()
+            .await?
+            .into_iter()
+            .filter(|peer| {
+                peer.status != PeerStatus::Deleting && peer.status != PeerStatus::Disabled
+            })
+            .map(|peer| peer.listen_port)
+            .collect::<Vec<_>>();
+        ports.sort_unstable();
+        ports.dedup();
+        run_nft_batch(&nft_port_batch(&ports)).await
     }
 
     async fn reserve_peer(
@@ -308,6 +354,7 @@ impl PeerManager {
         if self.remove_external_state(peer).await.is_ok() {
             let _ = self.db.delete_peer(peer.peer_id).await;
         }
+        let _ = self.sync_nft_ports().await;
     }
 
     async fn compensate_failed_update(&self, old_peer: &Peer) {
@@ -572,4 +619,99 @@ fn unique_suffix() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+fn nft_port_batch(ports: &[u16]) -> String {
+    let mut batch = "flush set inet nixos-fw autopeer-ports\n".to_string();
+    if !ports.is_empty() {
+        let ports = ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        batch.push_str(&format!(
+            "add element inet nixos-fw autopeer-ports {{ {ports} }}\n"
+        ));
+    }
+    batch
+}
+
+async fn run_nft_batch(batch: &str) -> Result<(), PeerError> {
+    #[cfg(debug_assertions)]
+    if std::env::var("MOCK_NFTABLES").is_ok() {
+        return Ok(());
+    }
+
+    tokio::time::timeout(Duration::from_secs(10), run_nft_batch_inner(batch))
+        .await
+        .map_err(|_| PeerError::Nftables {
+            detail: "nft did not finish within 10 seconds".to_string(),
+        })?
+}
+
+async fn run_nft_batch_inner(batch: &str) -> Result<(), PeerError> {
+    let mut child = Command::new("nft")
+        .args(["-f", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|source| PeerError::Nftables {
+            detail: format!("Could not start nft: {source}"),
+        })?;
+
+    let mut stdin = child.stdin.take().ok_or_else(|| PeerError::Nftables {
+        detail: "Could not open standard input for nft".to_string(),
+    })?;
+    stdin
+        .write_all(batch.as_bytes())
+        .await
+        .map_err(|source| PeerError::Nftables {
+            detail: format!("Could not write the nftables batch: {source}"),
+        })?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|source| PeerError::Nftables {
+            detail: format!("Could not read the nft result: {source}"),
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(PeerError::Nftables {
+        detail: format!(
+            "nft failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        ),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nft_port_batch;
+
+    #[test]
+    fn nft_batch_flushes_an_empty_set() {
+        assert_eq!(
+            nft_port_batch(&[]),
+            "flush set inet nixos-fw autopeer-ports\n"
+        );
+    }
+
+    #[test]
+    fn nft_batch_replaces_all_ports() {
+        assert_eq!(
+            nft_port_batch(&[20_001, 29_999]),
+            concat!(
+                "flush set inet nixos-fw autopeer-ports\n",
+                "add element inet nixos-fw autopeer-ports { 20001, 29999 }\n"
+            )
+        );
+    }
 }

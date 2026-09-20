@@ -10,6 +10,7 @@ It uses PostgreSQL as the durable source of peer state.
 - `wireguard-control` applies WireGuard keys, endpoints, listen ports, and peers.
 - Askama renders BIRD configuration files.
 - PostgreSQL stores desired peer state, operation state, listen ports, and authentication nonces.
+- nftables admits the UDP listen ports that PostgreSQL assigns to active peers.
 - `utoipa` publishes the OpenAPI specification at `/api-docs/openapi.json`.
 
 ## Agent-native peering
@@ -196,6 +197,15 @@ The database records `provisioning` before an external create or update.
 It records `deleting` before an external delete.
 On startup, the service completes these operations before it opens the HTTP listener.
 It also recreates every active interface and BIRD configuration from PostgreSQL.
+
+The NixOS module enables the nftables firewall backend.
+It adds the `autopeer-ports` set to the NixOS input table.
+The service rebuilds this set from PostgreSQL after each create or delete.
+It also rebuilds the set during startup and every 30 seconds.
+This periodic sync repairs the set after an nftables reload.
+
+The systemd service starts after `nftables.service`.
+Its executable path includes `pkgs.nftables`, and it retains `CAP_NET_ADMIN` for netlink and nftables changes.
 
 The service writes each BIRD configuration to a temporary file in the target directory.
 It flushes and syncs the file before an atomic rename.

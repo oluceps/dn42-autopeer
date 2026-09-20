@@ -45,6 +45,9 @@ pub enum PeerError {
     #[snafu(display("bird syntax check or reload failed. stderr: {stderr}"))]
     BirdReload { stderr: String },
 
+    #[snafu(display("nftables synchronization failed: {detail}"))]
+    Nftables { detail: String },
+
     #[snafu(display("challenge verification failed: {detail}"))]
     UnauthorizedChallenge { detail: String },
 
@@ -151,6 +154,7 @@ impl IntoResponse for PeerError {
             PeerError::Netlink { .. }
             | PeerError::BirdConfigIo { .. }
             | PeerError::BirdReload { .. }
+            | PeerError::Nftables { .. }
             | PeerError::Database { .. } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error".to_string(),

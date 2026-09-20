@@ -57,18 +57,42 @@ in
   };
 
   config = mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = config.networking.firewall.enable && config.networking.firewall.backend == "nftables";
+        message = "services.autopeer requires the NixOS nftables firewall.";
+      }
+    ];
+
+    networking.nftables = {
+      enable = true;
+      tables."nixos-fw".content = mkBefore ''
+        set autopeer-ports {
+          type inet_service
+          comment "DN42 autopeer WireGuard listen ports"
+        }
+      '';
+    };
+
+    networking.firewall.extraInputRules = mkAfter ''
+      udp dport @autopeer-ports accept comment "DN42 autopeer WireGuard"
+    '';
+
     systemd.services.autopeer = {
       description = "DN42 Autopeer Web Server";
       after = [
         "network-online.target"
+        "nftables.service"
         "bird.service"
         "postgresql.service"
       ];
       wants = [
         "network-online.target"
+        "nftables.service"
         "bird.service"
       ];
       wantedBy = [ "multi-user.target" ];
+      path = [ pkgs.nftables ];
 
       environment = {
         PORT = toString cfg.port;
