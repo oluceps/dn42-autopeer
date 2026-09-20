@@ -47,6 +47,7 @@ impl PeerStore {
                 remote_ll_ip VARCHAR NOT NULL,
                 status VARCHAR NOT NULL,
                 listen_port INT NOT NULL UNIQUE,
+                mtu INT NOT NULL DEFAULT 1420,
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE (asn, peer_name)
@@ -124,8 +125,8 @@ impl PeerStore {
         let result = sqlx::query(
             r#"
             INSERT INTO peers
-                (peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'provisioning', $9)
+                (peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port, mtu)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'provisioning', $9, $10)
             ON CONFLICT DO NOTHING
             "#,
         )
@@ -138,6 +139,7 @@ impl PeerStore {
         .bind(peer.local_ll_ip.to_string())
         .bind(peer.remote_ll_ip.to_string())
         .bind(peer.listen_port as i32)
+        .bind(peer.mtu as i32)
         .execute(&self.pool)
         .await
         .map_err(|source| PeerError::Database { source })?;
@@ -165,6 +167,7 @@ impl PeerStore {
                 remote_ll_ip = $6,
                 status = 'provisioning',
                 listen_port = $7,
+                mtu = $8,
                 updated_at = CURRENT_TIMESTAMP
             WHERE peer_id = $1
             "#,
@@ -176,6 +179,7 @@ impl PeerStore {
         .bind(peer.local_ll_ip.to_string())
         .bind(peer.remote_ll_ip.to_string())
         .bind(peer.listen_port as i32)
+        .bind(peer.mtu as i32)
         .execute(&self.pool)
         .await
         .map_err(|source| PeerError::Database { source })?;
@@ -218,7 +222,7 @@ impl PeerStore {
     pub async fn get_peer(&self, asn: u32, peer_name: &str) -> Result<Option<Peer>, PeerError> {
         let row = sqlx::query(
             r#"
-            SELECT peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port
+            SELECT peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port, mtu
             FROM peers WHERE asn = $1 AND peer_name = $2
             "#,
         )
@@ -233,7 +237,7 @@ impl PeerStore {
     pub async fn list_peers(&self) -> Result<Vec<Peer>, PeerError> {
         let rows = sqlx::query(
             r#"
-            SELECT peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port
+            SELECT peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port, mtu
             FROM peers ORDER BY asn, peer_name
             "#,
         )
@@ -270,6 +274,7 @@ fn row_to_peer(row: sqlx::postgres::PgRow) -> Result<Peer, PeerError> {
         u16::try_from(row.get::<i32, _>("listen_port")).map_err(|_| PeerError::Validation {
             detail: format!("The database contains an invalid listen port for AS{asn}"),
         })?;
+    let mtu = u16::try_from(row.try_get::<i32, _>("mtu").unwrap_or(1420)).unwrap_or(1420);
 
     Ok(Peer {
         peer_id,
@@ -282,6 +287,7 @@ fn row_to_peer(row: sqlx::postgres::PgRow) -> Result<Peer, PeerError> {
         remote_ll_ip,
         status: str_to_status(row.get("status")),
         listen_port,
+        mtu,
     })
 }
 

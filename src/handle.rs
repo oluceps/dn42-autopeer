@@ -47,6 +47,8 @@ pub struct CreatePeerReq {
     pub manual_lla: bool,
     pub local_ll_ip: Option<String>,
     pub remote_ll_ip: Option<String>,
+    #[schema(example = 1420)]
+    pub mtu: Option<u16>,
     pub challenge: Challenge,
 }
 
@@ -65,6 +67,9 @@ pub struct UpdatePeerReq {
     pub manual_lla: bool,
     pub local_ll_ip: Option<String>,
     pub remote_ll_ip: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    #[schema(value_type = Option<u16>, nullable = true, example = 1420)]
+    pub mtu: Option<Option<u16>>,
     pub challenge: Challenge,
 }
 
@@ -166,6 +171,7 @@ pub async fn create_peer(
         &payload.pubkey,
         endpoint.as_deref(),
         link_local,
+        payload.mtu,
         &payload.challenge.nonce,
         payload.challenge.expires_at,
     );
@@ -173,7 +179,7 @@ pub async fn create_peer(
 
     let peer = state
         .manager
-        .create_peer(payload.asn, peer_name, payload.pubkey, endpoint, link_local)
+        .create_peer(payload.asn, peer_name, payload.pubkey, endpoint, link_local, payload.mtu)
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -231,6 +237,7 @@ pub async fn update_peer(
         &payload.pubkey,
         endpoint.as_ref().map(|value| value.as_deref()),
         link_local,
+        payload.mtu,
         &payload.challenge.nonce,
         payload.challenge.expires_at,
     );
@@ -238,7 +245,7 @@ pub async fn update_peer(
 
     let peer = state
         .manager
-        .update_peer(payload.asn, peer_name, payload.pubkey, endpoint, link_local)
+        .update_peer(payload.asn, peer_name, payload.pubkey, endpoint, link_local, payload.mtu)
         .await?;
     Ok(Json(PeerResponse {
         status: "success".to_string(),

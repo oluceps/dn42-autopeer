@@ -26,6 +26,8 @@ pub struct Peer {
     pub status: PeerStatus,
     // actual local UDP port allocated to this interface
     pub listen_port: u16,
+    // interface MTU
+    pub mtu: u16,
 }
 
 // operational status of the peer

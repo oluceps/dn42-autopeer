@@ -236,13 +236,15 @@ pub fn build_create_message(
     pubkey: &WgPubKey,
     endpoint: Option<&str>,
     link_local: Option<(Ipv6Addr, Ipv6Addr)>,
+    mtu: Option<u16>,
     nonce: &str,
     expires_at: i64,
 ) -> String {
     format!(
-        "DN42-AUTOPEER-V2\noperation:create\nasn:{asn}\npeer_name:{peer_name}\npubkey:{pubkey}\nendpoint:{}\nlink_local:{}\nnonce:{nonce}\nexpires_at:{expires_at}",
+        "DN42-AUTOPEER-V3\noperation:create\nasn:{asn}\npeer_name:{peer_name}\npubkey:{pubkey}\nendpoint:{}\nlink_local:{}\nmtu:{}\nnonce:{nonce}\nexpires_at:{expires_at}",
         endpoint.unwrap_or("none"),
-        link_local_message(link_local)
+        link_local_message(link_local),
+        mtu.map(|m| m.to_string()).unwrap_or_else(|| "default".to_string())
     )
 }
 
@@ -252,6 +254,7 @@ pub fn build_update_message(
     pubkey: &WgPubKey,
     endpoint: Option<Option<&str>>,
     link_local: Option<(Ipv6Addr, Ipv6Addr)>,
+    mtu: Option<Option<u16>>,
     nonce: &str,
     expires_at: i64,
 ) -> String {
@@ -260,8 +263,13 @@ pub fn build_update_message(
         Some(None) => "clear".to_string(),
         Some(Some(value)) => format!("set:{value}"),
     };
+    let mtu_msg = match mtu {
+        None => "unchanged".to_string(),
+        Some(None) => "default".to_string(),
+        Some(Some(value)) => format!("set:{value}"),
+    };
     format!(
-        "DN42-AUTOPEER-V2\noperation:update\nasn:{asn}\npeer_name:{peer_name}\npubkey:{pubkey}\nendpoint:{endpoint}\nlink_local:{}\nnonce:{nonce}\nexpires_at:{expires_at}",
+        "DN42-AUTOPEER-V3\noperation:update\nasn:{asn}\npeer_name:{peer_name}\npubkey:{pubkey}\nendpoint:{endpoint}\nlink_local:{}\nmtu:{mtu_msg}\nnonce:{nonce}\nexpires_at:{expires_at}",
         link_local_message(link_local)
     )
 }
@@ -275,7 +283,7 @@ fn link_local_message(link_local: Option<(Ipv6Addr, Ipv6Addr)>) -> String {
 
 pub fn build_delete_message(asn: u32, peer_name: &str, nonce: &str, expires_at: i64) -> String {
     format!(
-        "DN42-AUTOPEER-V2\noperation:delete\nasn:{asn}\npeer_name:{peer_name}\nnonce:{nonce}\nexpires_at:{expires_at}"
+        "DN42-AUTOPEER-V3\noperation:delete\nasn:{asn}\npeer_name:{peer_name}\nnonce:{nonce}\nexpires_at:{expires_at}"
     )
 }
 
@@ -312,9 +320,9 @@ mod tests {
     fn signing_messages_bind_the_operation_and_endpoint_state() {
         let key =
             WgPubKey::try_from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()).unwrap();
-        let create = build_create_message(4242420001, "fra1", &key, None, None, "nonce", 100);
-        let update = build_update_message(4242420001, "fra1", &key, None, None, "nonce", 100);
-        let clear = build_update_message(4242420001, "fra1", &key, Some(None), None, "nonce", 100);
+        let create = build_create_message(4242420001, "fra1", &key, None, None, None, "nonce", 100);
+        let update = build_update_message(4242420001, "fra1", &key, None, None, None, "nonce", 100);
+        let clear = build_update_message(4242420001, "fra1", &key, Some(None), None, None, "nonce", 100);
         let delete = build_delete_message(4242420001, "fra1", "nonce", 100);
         let other_peer = build_delete_message(4242420001, "sin1", "nonce", 100);
 

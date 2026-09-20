@@ -69,6 +69,7 @@ impl PeerManager {
         pubkey: WgPubKey,
         endpoint: Option<String>,
         link_local: Option<(Ipv6Addr, Ipv6Addr)>,
+        mtu: Option<u16>,
     ) -> Result<Peer, PeerError> {
         let operation_lock = self.operation_lock(asn, &peer_name);
         let _operation_guard = operation_lock.lock().await;
@@ -78,7 +79,7 @@ impl PeerManager {
 
         let peer = {
             let _port_guard = self.port_lock.lock().await;
-            self.reserve_peer(asn, peer_name, pubkey, endpoint, link_local)
+            self.reserve_peer(asn, peer_name, pubkey, endpoint, link_local, mtu.unwrap_or(1420))
                 .await?
         };
 
@@ -117,6 +118,7 @@ impl PeerManager {
         pubkey: WgPubKey,
         endpoint: Option<Option<String>>,
         link_local: Option<(Ipv6Addr, Ipv6Addr)>,
+        mtu: Option<Option<u16>>,
     ) -> Result<Peer, PeerError> {
         let operation_lock = self.operation_lock(asn, &peer_name);
         let _operation_guard = operation_lock.lock().await;
@@ -137,6 +139,7 @@ impl PeerManager {
             endpoint: endpoint.unwrap_or_else(|| old_peer.endpoint.clone()),
             local_ll_ip: link_local.map_or_else(|| asn_link_local(self.local_asn), |value| value.0),
             remote_ll_ip: link_local.map_or_else(|| asn_link_local(asn), |value| value.1),
+            mtu: mtu.unwrap_or(Some(old_peer.mtu)).unwrap_or(1420),
             status: PeerStatus::Provisioning,
             ..old_peer.clone()
         };
@@ -271,6 +274,7 @@ impl PeerManager {
         pubkey: WgPubKey,
         endpoint: Option<String>,
         link_local: Option<(Ipv6Addr, Ipv6Addr)>,
+        mtu: u16,
     ) -> Result<Peer, PeerError> {
         let peer_id = self.db.allocate_peer_id().await?;
         let preferred_offset = asn % 10_000;
@@ -291,6 +295,7 @@ impl PeerManager {
                 endpoint.clone(),
                 link_local,
                 listen_port,
+                mtu,
             );
             if self.db.reserve_peer(&peer).await? {
                 return Ok(peer);
@@ -312,6 +317,7 @@ impl PeerManager {
         endpoint: Option<String>,
         link_local: (Ipv6Addr, Ipv6Addr),
         listen_port: u16,
+        mtu: u16,
     ) -> Peer {
         Peer {
             peer_id,
@@ -324,6 +330,7 @@ impl PeerManager {
             remote_ll_ip: link_local.1,
             status: PeerStatus::Provisioning,
             listen_port,
+            mtu,
         }
     }
 
@@ -333,7 +340,7 @@ impl PeerManager {
     }
 
     async fn apply_wireguard(&self, peer: &Peer) -> Result<(), PeerError> {
-        WgManager::ensure_wg_interface(&peer.iface_name).await?;
+        WgManager::ensure_wg_interface(&peer.iface_name, peer.mtu).await?;
         let endpoint = match peer.endpoint.as_deref() {
             Some(endpoint) => Some(resolve_endpoint(endpoint).await?),
             None => None,

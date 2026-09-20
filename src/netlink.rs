@@ -13,7 +13,7 @@ use wireguard_control::{Backend, Device, DeviceUpdate, InterfaceName, Key, PeerC
 pub struct WgManager;
 
 impl WgManager {
-    pub async fn ensure_wg_interface(iface_name: &str) -> Result<(), PeerError> {
+    pub async fn ensure_wg_interface(iface_name: &str, mtu: u16) -> Result<(), PeerError> {
         #[cfg(debug_assertions)]
         if std::env::var("MOCK_NETLINK").is_ok() {
             return Ok(());
@@ -52,7 +52,7 @@ impl WgManager {
         // Apply the up state on every call. This repairs a partial earlier attempt.
         handle
             .link()
-            .set(LinkUnspec::new_with_index(link.header.index).up().build())
+            .set(LinkUnspec::new_with_index(link.header.index).mtu(mtu as u32).up().build())
             .execute()
             .await
             .map_err(std::io::Error::other)

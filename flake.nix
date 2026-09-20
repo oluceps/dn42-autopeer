@@ -77,13 +77,13 @@
               check.enable = true;
               settings.hooks = {
                 nixfmt.enable = true;
-                # clippy = {
-                #   enable = true;
-                #   packageOverrides.cargo = pkgs.cargo;
-                #   packageOverrides.clippy = pkgs.clippy;
-                #   # some hooks provide settings
-                #   settings.allFeatures = true;
-                # };
+                clippy = {
+                  enable = true;
+                  packageOverrides.cargo = pkgs.cargo;
+                  packageOverrides.clippy = pkgs.clippy;
+                  # some hooks provide settings
+                  settings.allFeatures = true;
+                };
               };
             };
 
