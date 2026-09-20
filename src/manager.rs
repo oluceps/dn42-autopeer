@@ -309,6 +309,7 @@ impl PeerManager {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_peer(
         peer_id: u32,
         asn: u32,

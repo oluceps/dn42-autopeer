@@ -230,6 +230,7 @@ pub fn verify_signature(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_create_message(
     asn: u32,
     peer_name: &str,
@@ -248,6 +249,7 @@ pub fn build_create_message(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_update_message(
     asn: u32,
     peer_name: &str,

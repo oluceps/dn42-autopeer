@@ -60,6 +60,8 @@ pub struct UpdatePeerReq {
     pub peer_name: String,
     #[schema(example = "xyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyz=", value_type = String)]
     pub pubkey: WgPubKey,
+    // The outer Option records field presence in a PATCH request. The inner Option
+    // distinguishes an explicit JSON null from a replacement value.
     #[serde(default, deserialize_with = "deserialize_present_option")]
     #[schema(value_type = Option<String>, nullable = true, example = "peer.example.net:51820")]
     pub endpoint: Option<Option<String>>,
@@ -67,6 +69,7 @@ pub struct UpdatePeerReq {
     pub manual_lla: bool,
     pub local_ll_ip: Option<String>,
     pub remote_ll_ip: Option<String>,
+    // Missing keeps the current MTU, null restores the default, and a value replaces it.
     #[serde(default, deserialize_with = "deserialize_present_option")]
     #[schema(value_type = Option<u16>, nullable = true, example = 1420)]
     pub mtu: Option<Option<u16>>,
