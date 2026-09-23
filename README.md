@@ -198,6 +198,12 @@ The ASN and peer name select the machine to delete.
 The service only ignores a missing configuration file or interface.
 Other removal errors stop the operation.
 
+### Check peer status
+
+`GET /api/peers/{asn}` returns HTTP `200 OK` and a list of all peers under the specified ASN.
+The response includes each peer's name, public key, endpoint, link-local addresses, listen port, MTU, status, and creation/update timestamps.
+This endpoint does not require authentication and is intended to be used as a public looking glass.
+
 ## BIRD policy hooks
 
 Each generated BGP protocol passes the remote ASN and peer ID to two functions in the main BIRD configuration:

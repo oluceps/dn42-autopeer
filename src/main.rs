@@ -19,7 +19,9 @@ mod template;
 mod wg_pubkey;
 
 use challenge::RequestAuthorizer;
-use handle::{AppState, create_challenge, create_peer, delete_peer, openapi_json, update_peer};
+use handle::{
+    AppState, create_challenge, create_peer, delete_peer, get_peers, openapi_json, update_peer,
+};
 use manager::PeerManager;
 use persist::PeerStore;
 use wireguard_control::Key;
@@ -148,6 +150,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/challenges", post(create_challenge))
+        .route("/api/peers/{asn}", get(get_peers))
         .route(
             "/api/peers",
             post(create_peer).patch(update_peer).delete(delete_peer),

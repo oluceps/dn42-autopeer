@@ -1,5 +1,9 @@
 use crate::{challenge::RequestAuthorizer, error::ErrorResponse, wg_pubkey::WgPubKey};
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{net::Ipv6Addr, sync::Arc};
 use url::{Host, Url};
@@ -114,6 +118,20 @@ pub struct BgpConfig {
     pub extended_next_hop: bool,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PeerInfo {
+    pub peer_name: String,
+    pub pubkey: String,
+    pub endpoint: Option<String>,
+    pub local_ll_ip: String,
+    pub remote_ll_ip: String,
+    pub status: String,
+    pub listen_port: u16,
+    pub mtu: u16,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub manager: Arc<crate::manager::PeerManager>,
@@ -143,6 +161,27 @@ pub async fn create_challenge(
         StatusCode::CREATED,
         Json(ChallengeResponse { nonce, expires_at }),
     ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/peers/{asn}",
+    summary = "Get list of peers for a given ASN",
+    params(
+        ("asn" = u32, Path, description = "The ASN to look up")
+    ),
+    responses(
+        (status = 200, description = "List of peers", body = Vec<PeerInfo>)
+    ),
+    tag = "Peering"
+)]
+pub async fn get_peers(
+    State(state): State<AppState>,
+    Path(asn): Path<u32>,
+) -> Result<Json<Vec<PeerInfo>>, PeerError> {
+    // Call the database directly since it does not modify BIRD or WG state.
+    let peers = state.manager.get_peer_infos_by_asn(asn).await?;
+    Ok(Json(peers))
 }
 
 #[utoipa::path(
@@ -431,10 +470,10 @@ where
     info(
         title = "DN42 Autopeer API",
         description = "Automated peering setup and configuration API for DN42 networks.",
-        version = "2.0.0",
+        version = "2.1.0",
         contact(name = "DN42 Admin")
     ),
-    paths(create_challenge, create_peer, update_peer, delete_peer),
+    paths(create_challenge, create_peer, update_peer, delete_peer, get_peers),
     components(schemas(
         ChallengeRequest,
         ChallengeResponse,
@@ -445,6 +484,7 @@ where
         PeerResponse,
         WgConfig,
         BgpConfig,
+        PeerInfo,
         ErrorResponse
     ))
 )]

@@ -115,6 +115,10 @@ nonce:<nonce>
 expires_at:<unix-timestamp>
 ```
 
+Check:
+
+No authentication or signing message is required. Simply issue a `GET /api/peers/{asn}` request to fetch a list of peers and their detailed status for the given ASN.
+
 ## Handle the result
 
 Treat each challenge as single-use, including after a failed mutation.

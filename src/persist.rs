@@ -249,6 +249,41 @@ impl PeerStore {
         .map_err(|source| PeerError::Database { source })?;
         rows.into_iter().map(row_to_peer).collect()
     }
+
+    pub async fn get_peer_infos_by_asn(
+        &self,
+        asn: u32,
+    ) -> Result<Vec<crate::handle::PeerInfo>, PeerError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT peer_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port, mtu,
+                   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) as created_at,
+                   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) as updated_at
+            FROM peers WHERE asn = $1 ORDER BY peer_name
+            "#,
+        )
+        .bind(asn as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|source| PeerError::Database { source })?;
+
+        let infos = rows
+            .into_iter()
+            .map(|row| crate::handle::PeerInfo {
+                peer_name: row.get("peer_name"),
+                pubkey: row.get("pubkey"),
+                endpoint: row.get("endpoint"),
+                local_ll_ip: row.get("local_ll_ip"),
+                remote_ll_ip: row.get("remote_ll_ip"),
+                status: row.get("status"),
+                listen_port: row.try_get::<i32, _>("listen_port").unwrap_or(0) as u16,
+                mtu: row.try_get::<i32, _>("mtu").unwrap_or(1420) as u16,
+                created_at: row.try_get::<i64, _>("created_at").unwrap_or(0),
+                updated_at: row.try_get::<i64, _>("updated_at").unwrap_or(0),
+            })
+            .collect();
+        Ok(infos)
+    }
 }
 
 fn row_to_peer(row: sqlx::postgres::PgRow) -> Result<Peer, PeerError> {

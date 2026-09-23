@@ -171,6 +171,13 @@ impl PeerManager {
         })
     }
 
+    pub async fn get_peer_infos_by_asn(
+        &self,
+        asn: u32,
+    ) -> Result<Vec<crate::handle::PeerInfo>, PeerError> {
+        self.db.get_peer_infos_by_asn(asn).await
+    }
+
     pub async fn delete_peer(&self, asn: u32, peer_name: String) -> Result<Peer, PeerError> {
         let operation_lock = self.operation_lock(asn, &peer_name);
         let _operation_guard = operation_lock.lock().await;
