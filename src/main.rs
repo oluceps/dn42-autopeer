@@ -128,10 +128,9 @@ async fn main() {
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     if let Ok(mut new_listener) =
                         sqlx::postgres::PgListener::connect_with(&listener_pool).await
+                        && new_listener.listen("peer_changes").await.is_ok()
                     {
-                        if new_listener.listen("peer_changes").await.is_ok() {
-                            listener = new_listener;
-                        }
+                        listener = new_listener;
                     }
                 }
             }
