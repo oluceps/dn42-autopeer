@@ -51,6 +51,8 @@ async fn main() {
     let authorizer =
         RequestAuthorizer::new(db.clone()).expect("Failed to initialize request authentication");
 
+    let listener_pool = db.pool.clone();
+
     let peer_manager = Arc::new(PeerManager::new(
         db,
         bird_conf_dir,
@@ -74,6 +76,62 @@ async fn main() {
             interval.tick().await;
             if let Err(error) = nft_reconciler.sync_nft_ports().await {
                 eprintln!("Could not synchronize nftables ports: {error}");
+            }
+        }
+    });
+
+    let sync_manager = Arc::clone(&peer_manager);
+    tokio::spawn(async move {
+        let mut listener = sqlx::postgres::PgListener::connect_with(&listener_pool)
+            .await
+            .expect("Failed to connect to database listener");
+        listener
+            .listen("peer_changes")
+            .await
+            .expect("Failed to listen on peer_changes channel");
+        println!("Listening for peer_changes via PostgreSQL NOTIFY...");
+        loop {
+            match listener.recv().await {
+                Ok(notification) => {
+                    let payload = notification.payload();
+                    #[derive(serde::Deserialize)]
+                    struct PeerChange {
+                        peer_id: u32,
+                        asn: u32,
+                        peer_name: String,
+                        iface_name: String,
+                    }
+                    if let Ok(change) = serde_json::from_str::<PeerChange>(payload) {
+                        println!(
+                            "Passive sync for peer_id {} (AS{})",
+                            change.peer_id, change.asn
+                        );
+                        if let Err(e) = sync_manager
+                            .passive_sync_peer(
+                                change.peer_id,
+                                change.asn,
+                                &change.peer_name,
+                                &change.iface_name,
+                            )
+                            .await
+                        {
+                            eprintln!("Passive sync failed for peer {}: {}", change.peer_name, e);
+                        }
+                    } else {
+                        eprintln!("Received invalid payload on peer_changes: {}", payload);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Database listener error: {}", e);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    if let Ok(mut new_listener) =
+                        sqlx::postgres::PgListener::connect_with(&listener_pool).await
+                    {
+                        if new_listener.listen("peer_changes").await.is_ok() {
+                            listener = new_listener;
+                        }
+                    }
+                }
             }
         }
     });

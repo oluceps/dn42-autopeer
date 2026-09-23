@@ -257,6 +257,54 @@ impl PeerManager {
         Ok(())
     }
 
+    pub async fn passive_sync_peer(
+        &self,
+        peer_id: u32,
+        asn: u32,
+        peer_name: &str,
+        iface_name: &str,
+    ) -> Result<(), PeerError> {
+        let operation_lock = self.operation_lock(asn, peer_name);
+        let _operation_guard = operation_lock.lock().await;
+
+        match self.db.get_peer(asn, peer_name).await? {
+            Some(peer) => {
+                if peer.status != PeerStatus::Deleting && peer.status != PeerStatus::Disabled {
+                    self.apply_peer(&peer).await?;
+                    if peer.status != PeerStatus::Active {
+                        let _ = self.db.set_status(peer.peer_id, PeerStatus::Active).await;
+                    }
+                } else if peer.status == PeerStatus::Deleting {
+                    let _ = self.remove_external_state(&peer).await;
+                    let _ = self.db.delete_peer(peer.peer_id).await;
+                } else {
+                    let _ = self.remove_external_state(&peer).await;
+                }
+            }
+            None => {
+                let dummy_peer = Peer {
+                    peer_id,
+                    asn,
+                    peer_name: peer_name.to_string(),
+                    iface_name: iface_name.to_string(),
+                    pubkey: WgPubKey::try_from(
+                        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                    )
+                    .unwrap(),
+                    endpoint: None,
+                    local_ll_ip: Ipv6Addr::UNSPECIFIED,
+                    remote_ll_ip: Ipv6Addr::UNSPECIFIED,
+                    status: PeerStatus::Deleting,
+                    listen_port: 0,
+                    mtu: 1420,
+                };
+                let _ = self.remove_external_state(&dummy_peer).await;
+            }
+        }
+        let _ = self.sync_nft_ports().await;
+        Ok(())
+    }
+
     pub async fn sync_nft_ports(&self) -> Result<(), PeerError> {
         let _guard = self.nft_sync_lock.lock().await;
         let mut ports = self

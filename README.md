@@ -292,3 +292,4 @@ cargo run
 ```
 
 Open `http://127.0.0.1:8080/api-docs/openapi.json` for the OpenAPI specification.
+

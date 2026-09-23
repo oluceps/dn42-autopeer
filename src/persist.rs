@@ -8,18 +8,17 @@ use std::{env, str::FromStr};
 
 #[derive(Clone)]
 pub struct PeerStore {
-    pool: PgPool,
+    pub pool: PgPool,
 }
 
 impl PeerStore {
-    pub async fn new() -> Result<Self, PeerError> {
+    pub fn get_opts() -> Result<sqlx::postgres::PgConnectOptions, PeerError> {
         let db_url = env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://dn42-bot@localhost/dn42".to_string());
 
         let mut opts = sqlx::postgres::PgConnectOptions::from_str(&db_url)
             .map_err(|source| PeerError::Database { source })?;
 
-        // sqlx 0.9.0 retains brackets around IPv6 literals. Remove them before DNS lookup.
         if let Ok(parsed_url) = url::Url::parse(&db_url)
             && let Some(host) = parsed_url.host_str()
             && host.starts_with('[')
@@ -27,7 +26,11 @@ impl PeerStore {
         {
             opts = opts.host(&host[1..host.len() - 1]);
         }
+        Ok(opts)
+    }
 
+    pub async fn new() -> Result<Self, PeerError> {
+        let opts = Self::get_opts()?;
         let pool = PgPoolOptions::new()
             .max_connections(10)
             .connect_with(opts)
