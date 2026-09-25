@@ -2,7 +2,7 @@ use crate::{
     error::{BirdConfigIoSnafu, PeerError},
     netlink::WgManager,
     peer::{Peer, PeerStatus},
-    persist::PeerStore,
+    persist::{PeerChange, PeerStore},
     template::PeerTemplate,
     wg_pubkey::WgPubKey,
 };
@@ -12,6 +12,7 @@ use snafu::ResultExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
+    collections::{BTreeMap, HashSet},
     net::{Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
@@ -36,6 +37,7 @@ pub struct PeerManager {
     mutation_locks: DashMap<(u32, String), Arc<Mutex<()>>>,
     port_lock: Mutex<()>,
     nft_sync_lock: Mutex<()>,
+    bird_sync_lock: Mutex<()>,
 }
 
 impl PeerManager {
@@ -59,6 +61,7 @@ impl PeerManager {
             mutation_locks: DashMap::new(),
             port_lock: Mutex::new(()),
             nft_sync_lock: Mutex::new(()),
+            bird_sync_lock: Mutex::new(()),
         }
     }
 
@@ -171,6 +174,13 @@ impl PeerManager {
         })
     }
 
+    pub async fn get_peer_infos_by_asn(
+        &self,
+        asn: u32,
+    ) -> Result<Vec<crate::handle::PeerInfo>, PeerError> {
+        self.db.get_peer_infos_by_asn(asn).await
+    }
+
     pub async fn delete_peer(&self, asn: u32, peer_name: String) -> Result<Peer, PeerError> {
         let operation_lock = self.operation_lock(asn, &peer_name);
         let _operation_guard = operation_lock.lock().await;
@@ -196,12 +206,12 @@ impl PeerManager {
         }
 
         if let Err(error) = self.remove_external_state(&peer).await {
-            if self.apply_peer(&peer).await.is_ok()
-                && self
-                    .db
-                    .set_status(peer.peer_id, PeerStatus::Active)
-                    .await
-                    .is_ok()
+            if self
+                .db
+                .set_status(peer.peer_id, PeerStatus::Active)
+                .await
+                .is_ok()
+                && self.apply_peer(&peer).await.is_ok()
             {
                 let _ = self.sync_nft_ports().await;
             }
@@ -217,22 +227,51 @@ impl PeerManager {
 
     pub async fn recover(&self) -> Result<(), PeerError> {
         let peers = self.db.list_peers().await?;
+        let desired = peers
+            .iter()
+            .filter(|peer| {
+                peer.status != PeerStatus::Deleting && peer.status != PeerStatus::Disabled
+            })
+            .collect::<Vec<_>>();
 
-        for peer in peers.iter().filter(|peer| {
-            peer.status != PeerStatus::Deleting && peer.status != PeerStatus::Disabled
-        }) {
+        for peer in &desired {
             self.apply_wireguard(peer).await?;
         }
 
-        self.sync_nft_ports().await?;
+        self.sync_nft_ports_for(&peers).await?;
+        self.sync_bird_configs_for(&peers, true).await?;
+
+        for peer in peers.iter().filter(|peer| {
+            peer.status == PeerStatus::Deleting || peer.status == PeerStatus::Disabled
+        }) {
+            let operation_lock = self.operation_lock(peer.asn, &peer.peer_name);
+            let _operation_guard = operation_lock.lock().await;
+            WgManager::delete_interface(&peer.iface_name).await?;
+        }
+
+        let desired_interfaces = desired
+            .iter()
+            .map(|peer| peer.iface_name.as_str())
+            .collect::<HashSet<_>>();
+        for iface_name in WgManager::list_managed_interfaces().await? {
+            if !desired_interfaces.contains(iface_name.as_str()) {
+                WgManager::delete_interface(&iface_name).await?;
+            }
+        }
+
+        for change in self.db.list_peer_changes().await? {
+            if change.operation == "DELETE"
+                && self.db.get_peer_by_id(change.peer.peer_id).await?.is_none()
+                && change.peer.iface_name == format!("wgp{}", change.peer.peer_id)
+            {
+                WgManager::delete_interface(&change.peer.iface_name).await?;
+            }
+        }
 
         for peer in peers
             .iter()
             .filter(|peer| peer.status == PeerStatus::Deleting)
         {
-            let operation_lock = self.operation_lock(peer.asn, &peer.peer_name);
-            let _operation_guard = operation_lock.lock().await;
-            self.remove_external_state(peer).await?;
             if !self.db.delete_peer(peer.peer_id).await? {
                 return Err(PeerError::NotFound {
                     asn: peer.asn,
@@ -241,12 +280,9 @@ impl PeerManager {
             }
         }
 
-        for peer in peers.iter().filter(|peer| {
-            peer.status != PeerStatus::Deleting && peer.status != PeerStatus::Disabled
-        }) {
+        for peer in desired {
             let operation_lock = self.operation_lock(peer.asn, &peer.peer_name);
             let _operation_guard = operation_lock.lock().await;
-            self.install_bird_config(peer).await?;
             if !self.db.set_status(peer.peer_id, PeerStatus::Active).await? {
                 return Err(PeerError::NotFound {
                     asn: peer.asn,
@@ -257,13 +293,85 @@ impl PeerManager {
         Ok(())
     }
 
+    pub async fn sync_pending_peer_changes(&self) -> Result<(), PeerError> {
+        let changes = self.db.list_peer_changes().await?;
+        let mut first_error = None;
+
+        for change in changes {
+            match self.apply_peer_change(&change).await {
+                Ok(()) => match self.db.delete_peer_change(change.event_id).await {
+                    Ok(true) => {}
+                    Ok(false) => {}
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                },
+                Err(error) => {
+                    eprintln!(
+                        "Could not apply durable peer change {} ({}) for peer {}: {}",
+                        change.event_id, change.operation, change.peer.peer_name, error
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    async fn apply_peer_change(&self, change: &PeerChange) -> Result<(), PeerError> {
+        let snapshot = &change.peer;
+        let operation_lock = self.operation_lock(snapshot.asn, &snapshot.peer_name);
+        let _operation_guard = operation_lock.lock().await;
+
+        match self.db.get_peer_by_id(snapshot.peer_id).await? {
+            Some(peer) => {
+                if peer.status != PeerStatus::Deleting && peer.status != PeerStatus::Disabled {
+                    self.apply_peer(&peer).await?;
+                    if peer.status != PeerStatus::Active
+                        && !self.db.set_status(peer.peer_id, PeerStatus::Active).await?
+                    {
+                        return Err(PeerError::NotFound {
+                            asn: peer.asn,
+                            peer_name: peer.peer_name,
+                        });
+                    }
+                } else if peer.status == PeerStatus::Deleting {
+                    self.remove_external_state(&peer).await?;
+                    if !self.db.delete_peer(peer.peer_id).await? {
+                        return Err(PeerError::NotFound {
+                            asn: peer.asn,
+                            peer_name: peer.peer_name,
+                        });
+                    }
+                } else {
+                    self.remove_external_state(&peer).await?;
+                }
+            }
+            None => {
+                self.remove_external_state(snapshot).await?;
+            }
+        }
+        self.sync_nft_ports().await?;
+        Ok(())
+    }
+
     pub async fn sync_nft_ports(&self) -> Result<(), PeerError> {
+        let peers = self.db.list_peers().await?;
+        self.sync_nft_ports_for(&peers).await
+    }
+
+    async fn sync_nft_ports_for(&self, peers: &[Peer]) -> Result<(), PeerError> {
         let _guard = self.nft_sync_lock.lock().await;
-        let mut ports = self
-            .db
-            .list_peers()
-            .await?
-            .into_iter()
+        let mut ports = peers
+            .iter()
             .filter(|peer| {
                 peer.status != PeerStatus::Deleting && peer.status != PeerStatus::Disabled
             })
@@ -344,11 +452,11 @@ impl PeerManager {
 
     async fn apply_peer(&self, peer: &Peer) -> Result<(), PeerError> {
         self.apply_wireguard(peer).await?;
-        self.install_bird_config(peer).await
+        self.sync_bird_configs().await
     }
 
     async fn apply_wireguard(&self, peer: &Peer) -> Result<(), PeerError> {
-        WgManager::ensure_wg_interface(&peer.iface_name, peer.mtu).await?;
+        WgManager::ensure_wg_interface(&peer.iface_name, peer.peer_id, peer.mtu).await?;
         let endpoint = match peer.endpoint.as_deref() {
             Some(endpoint) => Some(resolve_endpoint(endpoint).await?),
             None => None,
@@ -373,10 +481,10 @@ impl PeerManager {
     }
 
     async fn compensate_failed_update(&self, old_peer: &Peer) {
-        if self.apply_peer(old_peer).await.is_err() {
+        if self.db.update_peer_desired(old_peer).await.is_err() {
             return;
         }
-        if self.db.update_peer_desired(old_peer).await.is_ok() {
+        if self.apply_peer(old_peer).await.is_ok() {
             let _ = self
                 .db
                 .set_status(old_peer.peer_id, PeerStatus::Active)
@@ -384,59 +492,176 @@ impl PeerManager {
         }
     }
 
-    async fn install_bird_config(&self, peer: &Peer) -> Result<(), PeerError> {
-        let template = PeerTemplate {
-            peer_id: peer.peer_id,
-            peer_name: &peer.peer_name,
-            asn: peer.asn,
-            local_asn: self.local_asn,
-            iface: &peer.iface_name,
-            local_ll_ip: peer.local_ll_ip,
-            remote_ll_ip: peer.remote_ll_ip,
-        };
-        let content = template.render().map_err(|error| PeerError::BirdReload {
-            stderr: format!("Failed to render the BIRD configuration: {error}"),
-        })?;
-        let path = self.config_path(&peer.iface_name);
-        let old_content = read_optional(&path).await?;
-        self.write_atomic(&path, content.as_bytes()).await?;
+    async fn remove_external_state(&self, peer: &Peer) -> Result<(), PeerError> {
+        self.sync_bird_configs().await?;
+        WgManager::delete_interface(&peer.iface_name).await
+    }
+
+    async fn sync_bird_configs(&self) -> Result<(), PeerError> {
+        let peers = self.db.list_peers().await?;
+        self.sync_bird_configs_for(&peers, false).await
+    }
+
+    async fn sync_bird_configs_for(
+        &self,
+        peers: &[Peer],
+        force_reload: bool,
+    ) -> Result<(), PeerError> {
+        let _guard = self.bird_sync_lock.lock().await;
+        self.ensure_bird_layout().await?;
+
+        let mut desired = BTreeMap::new();
+        for peer in peers.iter().filter(|peer| {
+            peer.status != PeerStatus::Deleting && peer.status != PeerStatus::Disabled
+        }) {
+            if peer.iface_name != format!("wgp{}", peer.peer_id) {
+                return Err(PeerError::Validation {
+                    detail: format!(
+                        "The database contains an invalid interface name for peer {}",
+                        peer.peer_id
+                    ),
+                });
+            }
+            let template = PeerTemplate {
+                peer_id: peer.peer_id,
+                peer_name: &peer.peer_name,
+                asn: peer.asn,
+                local_asn: self.local_asn,
+                iface: &peer.iface_name,
+                local_ll_ip: peer.local_ll_ip,
+                remote_ll_ip: peer.remote_ll_ip,
+            };
+            let content = template.render().map_err(|error| PeerError::BirdReload {
+                stderr: format!("Failed to render the BIRD configuration: {error}"),
+            })?;
+            desired.insert(format!("{}.conf", peer.iface_name), content.into_bytes());
+        }
+
+        if self.current_generation_matches(&desired).await? {
+            return if force_reload {
+                self.reload_bird().await
+            } else {
+                Ok(())
+            };
+        }
+
+        let generation_name = format!("generation-{}", unique_suffix());
+        let generation_path = self.generations_path().join(&generation_name);
+        tokio::fs::create_dir(&generation_path)
+            .await
+            .context(BirdConfigIoSnafu {
+                path: generation_path.clone(),
+            })?;
+        self.set_directory_mode(&generation_path).await?;
+        for (file_name, content) in &desired {
+            self.write_atomic(&generation_path.join(file_name), content)
+                .await?;
+        }
+        sync_directory(&generation_path).await?;
+
+        let current_path = self.current_path();
+        let old_target = tokio::fs::read_link(&current_path).await.ok();
+        self.switch_current(Path::new("generations").join(&generation_name))
+            .await?;
 
         if let Err(reload_error) = self.reload_bird().await {
-            let restore_result = match old_content {
-                Some(old_content) => self.write_atomic(&path, &old_content).await,
-                None => remove_optional(&path).await,
+            let restore_result = match old_target {
+                Some(target) => self.switch_current(target).await,
+                None => remove_optional(&current_path).await,
             };
             if let Err(restore_error) = restore_result {
                 return Err(PeerError::BirdReload {
                     stderr: format!(
-                        "{reload_error}. The previous configuration could not be restored: {restore_error}"
+                        "{reload_error}. The previous generation could not be restored: {restore_error}"
                     ),
                 });
             }
             let _ = self.reload_bird().await;
             return Err(reload_error);
         }
+
+        self.remove_old_generations(&generation_name).await;
         Ok(())
     }
 
-    async fn remove_external_state(&self, peer: &Peer) -> Result<(), PeerError> {
-        let path = self.config_path(&peer.iface_name);
-        let old_content = read_optional(&path).await?;
-        remove_optional(&path).await?;
-        if let Err(reload_error) = self.reload_bird().await {
-            if let Some(content) = old_content {
-                self.write_atomic(&path, &content).await?;
-                let _ = self.reload_bird().await;
-            }
-            return Err(reload_error);
-        }
+    async fn ensure_bird_layout(&self) -> Result<(), PeerError> {
+        let generations = self.generations_path();
+        let empty = generations.join("empty");
+        tokio::fs::create_dir_all(&empty)
+            .await
+            .context(BirdConfigIoSnafu {
+                path: empty.clone(),
+            })?;
+        self.set_directory_mode(&generations).await?;
+        self.set_directory_mode(&empty).await?;
 
-        if let Err(netlink_error) = WgManager::delete_interface(&peer.iface_name).await {
-            // Rebuild both external components before the caller restores the active state.
-            let _ = self.apply_peer(peer).await;
-            return Err(netlink_error);
+        let current = self.current_path();
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.switch_current(PathBuf::from("generations/empty"))
+                    .await
+            }
+            Err(source) => Err(PeerError::BirdConfigIo {
+                source,
+                path: current,
+            }),
+        }
+    }
+
+    async fn set_directory_mode(&self, path: &Path) -> Result<(), PeerError> {
+        #[cfg(unix)]
+        {
+            let mode = tokio::fs::metadata(&self.bird_conf_dir)
+                .await
+                .map(|metadata| metadata.permissions().mode() & 0o2777)
+                .context(BirdConfigIoSnafu {
+                    path: PathBuf::from(&self.bird_conf_dir),
+                })?;
+            tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .await
+                .context(BirdConfigIoSnafu {
+                    path: path.to_path_buf(),
+                })?;
         }
         Ok(())
+    }
+
+    async fn current_generation_matches(
+        &self,
+        desired: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<bool, PeerError> {
+        generation_matches(&self.current_path(), desired).await
+    }
+
+    async fn switch_current(&self, target: PathBuf) -> Result<(), PeerError> {
+        atomic_switch_current(self.bird_root(), &target).await
+    }
+
+    async fn remove_old_generations(&self, current_name: &str) {
+        let generations = self.generations_path();
+        let Ok(mut entries) = tokio::fs::read_dir(&generations).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "empty" || name == current_name || !name.starts_with("generation-") {
+                continue;
+            }
+            let _ = tokio::fs::remove_dir_all(entry.path()).await;
+        }
+    }
+
+    fn bird_root(&self) -> &Path {
+        Path::new(&self.bird_conf_dir)
+    }
+
+    fn generations_path(&self) -> PathBuf {
+        self.bird_root().join("generations")
+    }
+
+    fn current_path(&self) -> PathBuf {
+        self.bird_root().join("current")
     }
 
     async fn write_atomic(&self, path: &Path, content: &[u8]) -> Result<(), PeerError> {
@@ -449,14 +674,15 @@ impl PeerManager {
             std::process::id(),
             unique_suffix()
         ));
-        let directory_mode = tokio::fs::metadata(&self.bird_conf_dir)
+        let parent = path.parent().unwrap_or_else(|| self.bird_root());
+        let directory_mode = tokio::fs::metadata(parent)
             .await
             .map(|metadata| {
                 use std::os::unix::fs::PermissionsExt;
                 metadata.permissions().mode() & 0o666
             })
             .context(BirdConfigIoSnafu {
-                path: PathBuf::from(&self.bird_conf_dir),
+                path: parent.to_path_buf(),
             })?;
 
         let mut options = tokio::fs::OpenOptions::new();
@@ -571,10 +797,6 @@ impl PeerManager {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
-
-    fn config_path(&self, iface_name: &str) -> PathBuf {
-        Path::new(&self.bird_conf_dir).join(format!("{iface_name}.conf"))
-    }
 }
 
 async fn resolve_endpoint(endpoint: &str) -> Result<SocketAddr, PeerError> {
@@ -607,17 +829,6 @@ fn asn_link_local(asn: u32) -> Ipv6Addr {
     )
 }
 
-async fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, PeerError> {
-    match tokio::fs::read(path).await {
-        Ok(content) => Ok(Some(content)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(PeerError::BirdConfigIo {
-            source,
-            path: path.to_path_buf(),
-        }),
-    }
-}
-
 async fn remove_optional(path: &Path) -> Result<(), PeerError> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => Ok(()),
@@ -627,6 +838,65 @@ async fn remove_optional(path: &Path) -> Result<(), PeerError> {
             path: path.to_path_buf(),
         }),
     }
+}
+
+async fn sync_directory(path: &Path) -> Result<(), PeerError> {
+    let directory = tokio::fs::File::open(path)
+        .await
+        .context(BirdConfigIoSnafu {
+            path: path.to_path_buf(),
+        })?;
+    directory.sync_all().await.context(BirdConfigIoSnafu {
+        path: path.to_path_buf(),
+    })
+}
+
+async fn generation_matches(
+    generation_path: &Path,
+    desired: &BTreeMap<String, Vec<u8>>,
+) -> Result<bool, PeerError> {
+    let mut actual = BTreeMap::new();
+    let mut entries = match tokio::fs::read_dir(generation_path).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(PeerError::BirdConfigIo {
+                source,
+                path: generation_path.to_path_buf(),
+            });
+        }
+    };
+    while let Some(entry) = entries.next_entry().await.context(BirdConfigIoSnafu {
+        path: generation_path.to_path_buf(),
+    })? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".conf") {
+            continue;
+        }
+        let path = entry.path();
+        let content = tokio::fs::read(&path)
+            .await
+            .context(BirdConfigIoSnafu { path })?;
+        actual.insert(name, content);
+    }
+    Ok(&actual == desired)
+}
+
+async fn atomic_switch_current(root: &Path, target: &Path) -> Result<(), PeerError> {
+    let current = root.join("current");
+    let temporary = root.join(format!(".current.{}.tmp", unique_suffix()));
+    std::os::unix::fs::symlink(target, &temporary).map_err(|source| PeerError::BirdConfigIo {
+        source,
+        path: temporary.clone(),
+    })?;
+    if let Err(source) = tokio::fs::rename(&temporary, &current).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(PeerError::BirdConfigIo {
+            source,
+            path: current,
+        });
+    }
+    sync_directory(root).await
 }
 
 fn unique_suffix() -> u128 {
@@ -709,7 +979,8 @@ async fn run_nft_batch_inner(batch: &str) -> Result<(), PeerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::nft_port_batch;
+    use super::{atomic_switch_current, generation_matches, nft_port_batch, unique_suffix};
+    use std::{collections::BTreeMap, path::PathBuf};
 
     #[test]
     fn nft_batch_flushes_an_empty_set() {
@@ -728,5 +999,37 @@ mod tests {
                 "add element inet nixos-fw autopeer-ports { 20001, 29999 }\n"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn bird_generation_switch_is_atomic_and_comparable() {
+        let root = std::env::temp_dir().join(format!("autopeer-generation-{}", unique_suffix()));
+        let first = root.join("generations/first");
+        let second = root.join("generations/second");
+        tokio::fs::create_dir_all(&first).await.unwrap();
+        tokio::fs::create_dir_all(&second).await.unwrap();
+        std::os::unix::fs::symlink(PathBuf::from("generations/first"), root.join("current"))
+            .unwrap();
+
+        tokio::fs::write(second.join("wgp7.conf"), b"protocol bgp test {}\n")
+            .await
+            .unwrap();
+        atomic_switch_current(&root, &PathBuf::from("generations/second"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tokio::fs::read_link(root.join("current")).await.unwrap(),
+            PathBuf::from("generations/second")
+        );
+        let desired =
+            BTreeMap::from([("wgp7.conf".to_string(), b"protocol bgp test {}\n".to_vec())]);
+        assert!(
+            generation_matches(&root.join("current"), &desired)
+                .await
+                .unwrap()
+        );
+
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }

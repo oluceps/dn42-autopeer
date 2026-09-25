@@ -19,7 +19,9 @@ mod template;
 mod wg_pubkey;
 
 use challenge::RequestAuthorizer;
-use handle::{AppState, create_challenge, create_peer, delete_peer, openapi_json, update_peer};
+use handle::{
+    AppState, create_challenge, create_peer, delete_peer, get_peers, openapi_json, update_peer,
+};
 use manager::PeerManager;
 use persist::PeerStore;
 use wireguard_control::Key;
@@ -29,7 +31,7 @@ async fn main() {
     println!("Initializing DN42 Autopeer Web Server...");
 
     let bird_conf_dir =
-        std::env::var("BIRD_CONF_DIR").unwrap_or_else(|_| "/var/lib/autopeer".to_string());
+        std::env::var("BIRD_CONF_DIR").unwrap_or_else(|_| "/run/dn42-autopeer".to_string());
 
     std::fs::create_dir_all(&bird_conf_dir).expect("Failed to create the BIRD config directory");
 
@@ -50,6 +52,8 @@ async fn main() {
         .expect("Failed to initialize database");
     let authorizer =
         RequestAuthorizer::new(db.clone()).expect("Failed to initialize request authentication");
+
+    let listener_pool = db.pool.clone();
 
     let peer_manager = Arc::new(PeerManager::new(
         db,
@@ -78,6 +82,9 @@ async fn main() {
         }
     });
 
+    let sync_manager = Arc::clone(&peer_manager);
+    tokio::spawn(run_peer_change_listener(listener_pool, sync_manager));
+
     let state = AppState {
         manager: peer_manager,
         authorizer,
@@ -90,6 +97,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/challenges", post(create_challenge))
+        .route("/api/peers/{asn}", get(get_peers))
         .route(
             "/api/peers",
             post(create_peer).patch(update_peer).delete(delete_peer),
@@ -114,6 +122,54 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
+}
+
+async fn run_peer_change_listener(pool: sqlx::PgPool, manager: Arc<PeerManager>) {
+    loop {
+        let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("Could not connect to the peer-change listener: {error}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+        if let Err(error) = listener.listen("peer_changes").await {
+            eprintln!("Could not listen for peer changes: {error}");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        println!("Listening for peer changes via PostgreSQL NOTIFY...");
+        if let Err(error) = manager.sync_pending_peer_changes().await {
+            eprintln!("Could not synchronize pending peer changes: {error}");
+        }
+
+        let mut retry = tokio::time::interval(Duration::from_secs(30));
+        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        retry.tick().await;
+        loop {
+            tokio::select! {
+                notification = listener.recv() => match notification {
+                    Ok(_) => {
+                        if let Err(error) = manager.sync_pending_peer_changes().await {
+                            eprintln!("Could not synchronize pending peer changes: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("Database listener error: {error}");
+                        break;
+                    }
+                },
+                _ = retry.tick() => {
+                    if let Err(error) = manager.sync_pending_peer_changes().await {
+                        eprintln!("Could not retry pending peer changes: {error}");
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
 
 fn load_wg_keypair() -> (String, String) {

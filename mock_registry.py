@@ -30,7 +30,7 @@ class MockHandler(http.server.SimpleHTTPRequestHandler):
                 "mntner/TEST-MNT": {
                     "Attributes": [
                         ["mntner", "TEST-MNT"],
-                        ["auth", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOBz+SBn8O1744J1XQ3OpwIGmXnkWR9u8prAF5GfIL0B"]
+                        ["auth", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMDcYqby4TnhKV6xGyuZUtxOmTtXjKYp8r+uCxbGph65"]
                     ]
                 }
             }

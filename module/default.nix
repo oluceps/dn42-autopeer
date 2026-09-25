@@ -40,8 +40,8 @@ in
 
     birdConfDir = mkOption {
       type = types.str;
-      default = "/etc/bird/peers";
-      description = "Directory where the daemon will write BIRD configuration files.";
+      default = "/run/dn42-autopeer";
+      description = "Runtime directory for generated BIRD configuration generations.";
     };
 
     localAsn = mkOption {
@@ -77,6 +77,13 @@ in
     networking.firewall.extraInputRules = mkAfter ''
       udp dport @autopeer-ports accept comment "DN42 autopeer WireGuard"
     '';
+
+    systemd.tmpfiles.rules = [
+      "d ${cfg.birdConfDir} 2770 bird bird -"
+      "d ${cfg.birdConfDir}/generations 2770 bird bird -"
+      "d ${cfg.birdConfDir}/generations/empty 2770 bird bird -"
+      "L ${cfg.birdConfDir}/current - - - - ${cfg.birdConfDir}/generations/empty"
+    ];
 
     systemd.services.autopeer = {
       description = "DN42 Autopeer Web Server";
@@ -118,7 +125,7 @@ in
         # NET_ADMIN is exactly what is needed for netlink (adding/removing WG interfaces)
         AmbientCapabilities = [ "CAP_NET_ADMIN" ];
         CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
-        ReadWritePaths = [ "/var/lib/autopeer" ];
+        ReadWritePaths = [ cfg.birdConfDir ];
       };
     };
   };

@@ -13,7 +13,11 @@ use wireguard_control::{Backend, Device, DeviceUpdate, InterfaceName, Key, PeerC
 pub struct WgManager;
 
 impl WgManager {
-    pub async fn ensure_wg_interface(iface_name: &str, mtu: u16) -> Result<(), PeerError> {
+    pub async fn ensure_wg_interface(
+        iface_name: &str,
+        peer_id: u32,
+        mtu: u16,
+    ) -> Result<(), PeerError> {
         #[cfg(debug_assertions)]
         if std::env::var("MOCK_NETLINK").is_ok() {
             return Ok(());
@@ -55,6 +59,7 @@ impl WgManager {
             .set(
                 LinkUnspec::new_with_index(link.header.index)
                     .mtu(mtu as u32)
+                    .alias(format!("dn42-autopeer:{peer_id}"))
                     .up()
                     .build(),
             )
@@ -63,6 +68,46 @@ impl WgManager {
             .map_err(std::io::Error::other)
             .context(NetlinkSnafu { iface_name })?;
         Ok(())
+    }
+
+    pub async fn list_managed_interfaces() -> Result<Vec<String>, PeerError> {
+        #[cfg(debug_assertions)]
+        if std::env::var("MOCK_NETLINK").is_ok() {
+            return Ok(Vec::new());
+        }
+
+        let (connection, handle, _) =
+            new_connection()
+                .map_err(std::io::Error::other)
+                .context(NetlinkSnafu {
+                    iface_name: "all managed interfaces",
+                })?;
+        tokio::spawn(connection);
+
+        let mut links = handle.link().get().execute();
+        let mut names = Vec::new();
+        while let Some(link) = links.next().await {
+            let link = link.map_err(std::io::Error::other).context(NetlinkSnafu {
+                iface_name: "all managed interfaces",
+            })?;
+            let is_managed = link.attributes.iter().any(|attribute| {
+                matches!(attribute, LinkAttribute::IfAlias(alias) if alias.starts_with("dn42-autopeer:"))
+            });
+            if !is_managed {
+                continue;
+            }
+            if let Some(name) = link
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    LinkAttribute::IfName(name) => Some(name.clone()),
+                    _ => None,
+                })
+            {
+                names.push(name);
+            }
+        }
+        Ok(names)
     }
 
     pub async fn configure_local_address(

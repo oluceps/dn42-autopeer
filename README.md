@@ -198,29 +198,61 @@ The ASN and peer name select the machine to delete.
 The service only ignores a missing configuration file or interface.
 Other removal errors stop the operation.
 
+### Check peer status
+
+`GET /api/peers/{asn}` returns HTTP `200 OK` and a list of all peers under the specified ASN.
+The response includes each peer's name, public key, endpoint, link-local addresses, listen port, MTU, status, and creation/update timestamps.
+This endpoint does not require authentication and is intended to be used as a public looking glass.
+
 ## BIRD policy hooks
 
-Each generated BGP protocol passes the remote ASN and peer ID to two functions in the main BIRD configuration:
+Each generated BGP protocol opens an IPv6 channel for `dn42_v6` and an IPv4 channel for `dn42_v4`.
+The protocol passes the remote ASN and peer ID to four policy functions in the main BIRD configuration:
 
 ```bird
 function dn42_import_from_peer(int peer_asn; int peer_id) -> bool {
-  # Add machine-specific branches before this default.
+  if net.type != NET_IP6 then return false;
+  if (net.len < 44) || (net.len > 64) then return false;
+  if net ~ DN42_FIELD then return false;
+  if net ~ DN42_V6_RANGE && dn42_roa_check() then return true;
+  return false;
+}
+
+function dn42_import_from_peer_v4(int peer_asn; int peer_id) -> bool {
+  if net.type != NET_IP4 then return false;
+  if (net.len < 21) || (net.len > 29) then return false;
+  if net ~ DN42_FIELD_V4 then return false;
+  if net ~ DN42_V4_RANGE && dn42_roa_check() then return true;
   return false;
 }
 
 function dn42_export_to_peer(int peer_asn; int peer_id) -> bool {
-  # Add machine-specific branches before this default.
+  if source = RTS_STATIC && net ~ DN42_FIELD then return true;
+  if source = RTS_BGP && dn42_roa_check() then return true;
   return false;
 }
 
-import where dn42_import_from_peer(<remote-asn>, <peer-id>);
-export where dn42_export_to_peer(<remote-asn>, <peer-id>);
+function dn42_export_to_peer_v4(int peer_asn; int peer_id) -> bool {
+  if source = RTS_STATIC && net ~ DN42_FIELD_V4 then return true;
+  if source = RTS_BGP && dn42_roa_check() then return true;
+  return false;
+}
 ```
 
-Define both functions before the main configuration includes the generated peer fragments.
+Define `dn42_v6`, `dn42_v4`, the four functions, the prefix constants, and `dn42_roa_check()` before including generated peer fragments.
 Each function must return a Boolean value.
 Use the peer ID for machine-specific branches.
 Keep a final default branch for new machines.
+
+The NixOS module creates `BIRD_CONF_DIR` below `/run` before BIRD starts.
+With the default path, the main BIRD configuration must include:
+
+```bird
+include "/run/dn42-autopeer/current/*.conf";
+```
+
+Update this include when you change `BIRD_CONF_DIR`.
+The `current` symlink initially points to an empty generation.
 
 ## State recovery
 
@@ -229,8 +261,9 @@ This lock serializes changes for one machine without blocking another machine un
 
 The database records `provisioning` before an external create or update.
 It records `deleting` before an external delete.
-On startup, the service completes these operations before it opens the HTTP listener.
-It also recreates every active interface and BIRD configuration from PostgreSQL.
+On startup, the service reads all peers from PostgreSQL before it opens the HTTP listener.
+It repairs each desired WireGuard interface and replaces the nftables port set.
+It also removes stale interfaces that have a `dn42-autopeer:<peer-id>` interface alias.
 
 The NixOS module enables the nftables firewall backend.
 It adds the `autopeer-ports` set to the NixOS input table.
@@ -241,9 +274,11 @@ This periodic sync repairs the set after an nftables reload.
 The systemd service starts after `nftables.service`.
 Its executable path includes `pkgs.nftables`, and it retains `CAP_NET_ADMIN` for netlink and nftables changes.
 
-The service writes each BIRD configuration to a temporary file in the target directory.
-It flushes and syncs the file before an atomic rename.
-If BIRD rejects a reload, the service restores the prior file.
+The service renders the complete BIRD configuration into a new generation directory.
+It flushes the files, atomically switches `current`, and reloads BIRD one time.
+If BIRD rejects the generation, the service restores the prior symlink and reloads the prior generation.
+Startup reloads the current generation once, even when its files did not change.
+The `/run` filesystem clears all generations during a machine restart.
 
 The service configures the local `/64` link-local address on each WireGuard interface.
 It also sets an existing interface up during every repair attempt.
@@ -260,7 +295,7 @@ The service does not install kernel routes for these prefixes.
 |---|---|---|
 | `PORT` | HTTP listen port | `8080` |
 | `DATABASE_URL` | PostgreSQL connection string | `postgres://dn42-bot@localhost/dn42` |
-| `BIRD_CONF_DIR` | BIRD fragment directory | `/var/lib/autopeer` |
+| `BIRD_CONF_DIR` | BIRD generation root | `/run/dn42-autopeer` |
 | `BIRD_SOCKET` | BIRD control socket | `/run/bird/bird.ctl` |
 | `WG_PRIVATE_KEY` | Local WireGuard private key | Required |
 | `WG_PUBLIC_KEY` | Matching local WireGuard public key | Required |
