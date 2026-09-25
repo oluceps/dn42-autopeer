@@ -70,7 +70,7 @@ test-api:
         ls $test_dir
         print "Config file contents:"
         let iface_name = (psql $env.DATABASE_URL -Atc "SELECT iface_name FROM peers WHERE asn = 4242421234 AND peer_name = 'fra1';" | str trim)
-        cat $"($test_dir)/($iface_name).conf"
+        cat $"($test_dir)/current/($iface_name).conf"
 
         print "========== [3] Update Peer (Endpoint Roaming) =========="
         let update_payload = '{"asn": 4242421234, "peer_name": "fra1", "pubkey": "q1z/aK6XjHhKxXjVvV/5lD9hW2l8aU+21u6Vz9+Y1gQ=", "endpoint": "203.0.113.1:51820", "challenge": { "auth": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOBz+SBn8O1744J1XQ3OpwIGmXnkWR9u8prAF5GfIL0B", "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg4HP5IGfw7XvjgnVdDc6nAgaZee\nRZH27ymsAXkZ8gvQEAAAAEZG40MgAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gtZWQyNTUx\nOQAAAEBjZYSC/ZKn0OOd1vVVbjcTCtSZrAiZn1qn1ULuMTLC9jpOvMpMAeWi1klxvBpRq6\nisLKZQnKp5gsQyeSQeu2AM\n-----END SSH SIGNATURE-----", "nonce": "dummy_nonce", "expires_at": 9999999999 }}'
@@ -89,7 +89,7 @@ test-api:
         print $res
         
         print "========== [6] Verify Deletion (RAII & Cleanup) =========="
-        let files = (ls $test_dir)
+        let files = (ls $"($test_dir)/current")
         if ($files | length) == 0 {
             print "BIRD config file successfully cleaned up by business logic!"
         } else {

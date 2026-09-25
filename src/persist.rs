@@ -11,6 +11,13 @@ pub struct PeerStore {
     pub pool: PgPool,
 }
 
+#[derive(Debug)]
+pub struct PeerChange {
+    pub event_id: i64,
+    pub operation: String,
+    pub peer: Peer,
+}
+
 impl PeerStore {
     pub fn get_opts() -> Result<sqlx::postgres::PgConnectOptions, PeerError> {
         let db_url = env::var("DATABASE_URL")
@@ -69,6 +76,89 @@ impl PeerStore {
                 expires_at BIGINT NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .map_err(|source| PeerError::Database { source })?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS peer_change_events (
+                event_id BIGSERIAL PRIMARY KEY,
+                operation VARCHAR NOT NULL,
+                peer_id INT NOT NULL,
+                asn BIGINT NOT NULL,
+                peer_name VARCHAR(32) NOT NULL,
+                iface_name VARCHAR NOT NULL,
+                pubkey VARCHAR NOT NULL,
+                endpoint VARCHAR,
+                local_ll_ip VARCHAR NOT NULL,
+                remote_ll_ip VARCHAR NOT NULL,
+                status VARCHAR NOT NULL,
+                listen_port INT NOT NULL,
+                mtu INT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .map_err(|source| PeerError::Database { source })?;
+
+        sqlx::query(
+            r#"
+            CREATE OR REPLACE FUNCTION autopeer_enqueue_peer_change()
+            RETURNS TRIGGER
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    INSERT INTO peer_change_events
+                        (operation, peer_id, asn, peer_name, iface_name, pubkey, endpoint,
+                         local_ll_ip, remote_ll_ip, status, listen_port, mtu)
+                    VALUES
+                        (TG_OP, OLD.peer_id, OLD.asn, OLD.peer_name, OLD.iface_name, OLD.pubkey,
+                         OLD.endpoint, OLD.local_ll_ip, OLD.remote_ll_ip, OLD.status,
+                         OLD.listen_port, OLD.mtu);
+                    PERFORM pg_notify('peer_changes', 'changed');
+                    RETURN OLD;
+                END IF;
+
+                INSERT INTO peer_change_events
+                    (operation, peer_id, asn, peer_name, iface_name, pubkey, endpoint,
+                     local_ll_ip, remote_ll_ip, status, listen_port, mtu)
+                VALUES
+                    (TG_OP, NEW.peer_id, NEW.asn, NEW.peer_name, NEW.iface_name, NEW.pubkey,
+                     NEW.endpoint, NEW.local_ll_ip, NEW.remote_ll_ip, NEW.status,
+                     NEW.listen_port, NEW.mtu);
+                PERFORM pg_notify('peer_changes', 'changed');
+                RETURN NEW;
+            END;
+            $$
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .map_err(|source| PeerError::Database { source })?;
+
+        sqlx::query(
+            r#"
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_trigger
+                    WHERE tgname = 'autopeer_peer_changes'
+                      AND tgrelid = 'peers'::regclass
+                      AND NOT tgisinternal
+                ) THEN
+                    CREATE TRIGGER autopeer_peer_changes
+                    AFTER INSERT OR UPDATE OR DELETE ON peers
+                    FOR EACH ROW EXECUTE FUNCTION autopeer_enqueue_peer_change();
+                END IF;
+            END;
+            $$
             "#,
         )
         .execute(&pool)
@@ -237,6 +327,20 @@ impl PeerStore {
         row.map(row_to_peer).transpose()
     }
 
+    pub async fn get_peer_by_id(&self, peer_id: u32) -> Result<Option<Peer>, PeerError> {
+        let row = sqlx::query(
+            r#"
+            SELECT peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port, mtu
+            FROM peers WHERE peer_id = $1
+            "#,
+        )
+        .bind(peer_id as i32)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|source| PeerError::Database { source })?;
+        row.map(row_to_peer).transpose()
+    }
+
     pub async fn list_peers(&self) -> Result<Vec<Peer>, PeerError> {
         let rows = sqlx::query(
             r#"
@@ -283,6 +387,42 @@ impl PeerStore {
             })
             .collect();
         Ok(infos)
+    }
+
+    pub async fn list_peer_changes(&self) -> Result<Vec<PeerChange>, PeerError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT event_id, operation, peer_id, asn, peer_name, iface_name, pubkey, endpoint,
+                   local_ll_ip, remote_ll_ip, status, listen_port, mtu
+            FROM peer_change_events
+            ORDER BY event_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|source| PeerError::Database { source })?;
+
+        rows.into_iter()
+            .map(|row| {
+                let event_id = row.get("event_id");
+                let operation = row.get("operation");
+                let peer = row_to_peer(row)?;
+                Ok(PeerChange {
+                    event_id,
+                    operation,
+                    peer,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn delete_peer_change(&self, event_id: i64) -> Result<bool, PeerError> {
+        let result = sqlx::query("DELETE FROM peer_change_events WHERE event_id = $1")
+            .bind(event_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|source| PeerError::Database { source })?;
+        Ok(result.rows_affected() == 1)
     }
 }
 

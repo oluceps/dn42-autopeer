@@ -88,6 +88,9 @@ mod tests {
         assert!(result.contains("table dn42_v6;"));
         assert!(result.contains("import where dn42_import_from_peer(4242421234, 7);"));
         assert!(result.contains("export where dn42_export_to_peer(4242421234, 7);"));
+        assert!(result.contains("table dn42_v4;"));
+        assert!(result.contains("import where dn42_import_from_peer_v4(4242421234, 7);"));
+        assert!(result.contains("export where dn42_export_to_peer_v4(4242421234, 7);"));
     }
 
     #[test]
