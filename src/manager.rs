@@ -552,7 +552,6 @@ impl PeerManager {
             .context(BirdConfigIoSnafu {
                 path: generation_path.clone(),
             })?;
-        self.set_directory_mode(&generation_path).await?;
         for (file_name, content) in &desired {
             self.write_atomic(&generation_path.join(file_name), content)
                 .await?;
@@ -592,8 +591,6 @@ impl PeerManager {
             .context(BirdConfigIoSnafu {
                 path: empty.clone(),
             })?;
-        self.set_directory_mode(&generations).await?;
-        self.set_directory_mode(&empty).await?;
 
         let current = self.current_path();
         match tokio::fs::symlink_metadata(&current).await {
@@ -607,24 +604,6 @@ impl PeerManager {
                 path: current,
             }),
         }
-    }
-
-    async fn set_directory_mode(&self, path: &Path) -> Result<(), PeerError> {
-        #[cfg(unix)]
-        {
-            let mode = tokio::fs::metadata(&self.bird_conf_dir)
-                .await
-                .map(|metadata| metadata.permissions().mode() & 0o2777)
-                .context(BirdConfigIoSnafu {
-                    path: PathBuf::from(&self.bird_conf_dir),
-                })?;
-            tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-                .await
-                .context(BirdConfigIoSnafu {
-                    path: path.to_path_buf(),
-                })?;
-        }
-        Ok(())
     }
 
     async fn current_generation_matches(

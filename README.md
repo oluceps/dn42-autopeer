@@ -282,6 +282,8 @@ The `/run` filesystem clears all generations during a machine restart.
 
 The service configures the local `/64` link-local address on each WireGuard interface.
 It also sets an existing interface up during every repair attempt.
+The service sets IPv4 `rp_filter` to `0` on each managed WireGuard interface during creation and recovery.
+It does not change the global or default `rp_filter` values.
 
 ## WireGuard AllowedIPs
 

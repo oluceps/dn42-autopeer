@@ -3,7 +3,8 @@ use crate::wg_pubkey::WgPubKey;
 use futures::StreamExt;
 use rtnetlink::{
     Handle, LinkUnspec, LinkWireguard, new_connection,
-    packet_route::link::{LinkAttribute, LinkMessage},
+    packet_core::{DefaultNla, Emitable, NLA_F_NESTED},
+    packet_route::link::{AfSpecInet, AfSpecUnspec, LinkAttribute, LinkMessage},
 };
 use snafu::ResultExt;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -60,6 +61,7 @@ impl WgManager {
                 LinkUnspec::new_with_index(link.header.index)
                     .mtu(mtu as u32)
                     .alias(format!("dn42-autopeer:{peer_id}"))
+                    .append_extra_attribute(disable_rp_filter_attribute())
                     .up()
                     .build(),
             )
@@ -230,6 +232,19 @@ impl WgManager {
     }
 }
 
+fn disable_rp_filter_attribute() -> LinkAttribute {
+    const IFLA_INET_CONF: u16 = 1;
+    const IPV4_DEVCONF_RP_FILTER: u16 = 8;
+
+    let rp_filter = DefaultNla::new(IPV4_DEVCONF_RP_FILTER, 0_u32.to_ne_bytes().to_vec());
+    let mut devconf = vec![0; rp_filter.buffer_len()];
+    rp_filter.emit(&mut devconf);
+
+    LinkAttribute::AfSpecUnspec(vec![AfSpecUnspec::Inet(vec![AfSpecInet::Other(
+        DefaultNla::new(IFLA_INET_CONF | NLA_F_NESTED, devconf),
+    )])])
+}
+
 async fn find_link(handle: &Handle, iface_name: &str) -> Result<Option<LinkMessage>, PeerError> {
     let mut links = handle.link().get().execute();
     while let Some(link) = links.next().await {
@@ -256,6 +271,29 @@ fn parse_interface_name(iface_name: &str) -> Result<InterfaceName, PeerError> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use rtnetlink::packet_core::Nla;
+
+    #[test]
+    fn rp_filter_update_encodes_an_explicit_zero() {
+        let LinkAttribute::AfSpecUnspec(families) = disable_rp_filter_attribute() else {
+            panic!("expected an AF_SPEC attribute");
+        };
+        let AfSpecUnspec::Inet(settings) = &families[0] else {
+            panic!("expected an IPv4 setting");
+        };
+        let AfSpecInet::Other(devconf) = &settings[0] else {
+            panic!("expected a nested IPv4 devconf setting");
+        };
+
+        assert_eq!(devconf.kind(), 1 | NLA_F_NESTED);
+        let mut encoded = vec![0; devconf.value_len()];
+        devconf.emit_value(&mut encoded);
+        assert_eq!(
+            encoded,
+            [8, 0, 8, 0, 0, 0, 0, 0],
+            "the nested rp_filter value must include an explicit zero"
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires access to the host Netlink socket"]

@@ -116,6 +116,7 @@ in
         Type = "simple";
         Restart = "on-failure";
         RestartSec = "5s";
+        UMask = "0007";
 
         # Security Hardening
         DynamicUser = true;
