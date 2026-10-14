@@ -1,3 +1,4 @@
+use crate::observability::{ErrorInfo, LogError, log_api_failure};
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -84,9 +85,59 @@ pub struct ErrorResponse {
     pub detail: Option<String>,
 }
 
+impl LogError for PeerError {
+    fn log_info(&self) -> ErrorInfo {
+        let code = match self {
+            Self::Database { source } => return source.log_info(),
+            Self::Netlink { .. } => "netlink",
+            Self::BirdConfigIo { .. } => "bird_io",
+            Self::BirdReload { .. } => "bird_reload",
+            Self::Nftables { .. } => "nftables",
+            Self::RegistryUnavailable { .. } => "registry_unavailable",
+            Self::RegistryMismatch => "registry_mismatch",
+            Self::UnauthorizedChallenge { .. } => "unauthorized_challenge",
+            Self::SignatureVerificationFailed { .. } => "signature_verification_failed",
+            Self::Validation { .. } => "validation_failed",
+            Self::NotFound { .. } => "not_found",
+            Self::AlreadyExists { .. } => "already_exists",
+            Self::InvalidIp { .. } => "invalid_ip",
+            Self::InvalidAsn { .. } => "invalid_asn",
+            Self::InvalidWgPubKeyLength { .. } => "invalid_wg_pubkey_length",
+            Self::InvalidWgPubKeyBase64 { .. } => "invalid_wg_pubkey_base64",
+        };
+        let kind = match self {
+            Self::RegistryUnavailable { detail } if detail == "The registry check timed out" => {
+                "timeout"
+            }
+            Self::RegistryUnavailable { detail }
+                if detail == "Too many registry checks are active" =>
+            {
+                "concurrency_limit"
+            }
+            Self::BirdReload { stderr } if stderr == "BIRD did not respond within 10 seconds" => {
+                "timeout"
+            }
+            Self::Nftables { detail } if detail == "nft did not finish within 10 seconds" => {
+                "timeout"
+            }
+            Self::Validation { detail }
+                if detail.starts_with("DNS lookup timed out for endpoint ") =>
+            {
+                "timeout"
+            }
+            _ => code,
+        };
+        let mut info = ErrorInfo::new(code, kind);
+        if let Self::Netlink { source, .. } | Self::BirdConfigIo { source, .. } = self {
+            info.io_code = source.raw_os_error();
+        }
+        info
+    }
+}
+
 impl IntoResponse for PeerError {
     fn into_response(self) -> axum::response::Response {
-        eprintln!("API Error: {:?}", self);
+        let log_info = self.log_info();
         let (status, error, detail) = match self {
             PeerError::UnauthorizedChallenge { detail } => (
                 StatusCode::FORBIDDEN,
@@ -161,6 +212,7 @@ impl IntoResponse for PeerError {
                 None,
             ),
         };
+        log_api_failure(status.as_u16(), &log_info);
         (status, axum::Json(ErrorResponse { error, detail })).into_response()
     }
 }

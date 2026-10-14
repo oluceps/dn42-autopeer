@@ -1,3 +1,4 @@
+use crate::observability::{ObserveResult, log_failure, observe};
 use crate::{error::PeerError, persist::PeerStore, wg_pubkey::WgPubKey};
 use pgp::composed::{Deserializable, DetachedSignature, SignedPublicKey};
 use pgp::types::KeyDetails;
@@ -49,6 +50,7 @@ impl RequestAuthorizer {
         })
     }
 
+    #[tracing::instrument(skip_all, fields(operation = "issue_challenge", asn))]
     pub async fn issue_challenge(&self, asn: u32) -> Result<(String, i64), PeerError> {
         let expires_at = unix_timestamp() + CHALLENGE_TTL_SECS;
         for _ in 0..4 {
@@ -62,6 +64,7 @@ impl RequestAuthorizer {
         })
     }
 
+    #[tracing::instrument(skip_all, fields(operation = "authorize", asn))]
     pub async fn authorize_request(
         &self,
         asn: u32,
@@ -82,7 +85,10 @@ impl RequestAuthorizer {
             return Ok(());
         }
 
-        verify_signature(public_key, signature, expected_message)?;
+        observe("signature_verify", async {
+            verify_signature(public_key, signature, expected_message)
+        })
+        .await?;
         let _permit =
             self.registry_limit
                 .try_acquire()
@@ -94,17 +100,20 @@ impl RequestAuthorizer {
                 detail: "The challenge is expired, unknown, or already used".to_string(),
             });
         }
-        let is_authorized = tokio::time::timeout(
-            self.registry_timeout,
-            self.check_registry_for_asn_and_pubkey(asn, public_key),
-        )
-        .await
-        .map_err(|_| PeerError::RegistryUnavailable {
-            detail: "The registry check timed out".to_string(),
-        })?
-        .map_err(|_| PeerError::RegistryUnavailable {
-            detail: "The registry request failed".to_string(),
-        })?;
+        let is_authorized = observe("registry_authorization", async {
+            tokio::time::timeout(
+                self.registry_timeout,
+                self.check_registry_for_asn_and_pubkey(asn, public_key),
+            )
+            .await
+            .map_err(|_| PeerError::RegistryUnavailable {
+                detail: "The registry check timed out".to_string(),
+            })?
+            .map_err(|_| PeerError::RegistryUnavailable {
+                detail: "The registry request failed".to_string(),
+            })
+        })
+        .await?;
         if !is_authorized {
             return Err(PeerError::RegistryMismatch);
         }
@@ -129,9 +138,14 @@ impl RequestAuthorizer {
             .client
             .get(asn_url)
             .send()
+            .observed("registry_aut_num_http")
             .await?
-            .error_for_status()?
+            .error_for_status()
+            .inspect_err(|error| {
+                log_failure("registry_http_failed", error);
+            })?
             .json()
+            .observed("registry_aut_num_decode")
             .await?;
         let object_key = format!("aut-num/AS{asn}");
         let attributes = asn_response
@@ -155,11 +169,29 @@ impl RequestAuthorizer {
 
         for maintainer in maintainers {
             let url = format!("{}/mntner/{}", self.registry_url, maintainer);
-            let response = match self.client.get(url).send().await {
+            let response = match self
+                .client
+                .get(url)
+                .send()
+                .observed("registry_mntner_http")
+                .await
+            {
                 Ok(response) if response.status().is_success() => response,
-                _ => continue,
+                Ok(response) => {
+                    tracing::warn!(
+                        event = "registry_http_failed",
+                        http_status = response.status().as_u16(),
+                        "Registry returned an unsuccessful status"
+                    );
+                    continue;
+                }
+                Err(_) => continue,
             };
-            let json = match response.json::<serde_json::Value>().await {
+            let json = match response
+                .json::<serde_json::Value>()
+                .observed("registry_mntner_decode")
+                .await
+            {
                 Ok(json) => json,
                 Err(_) => continue,
             };

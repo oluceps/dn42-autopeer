@@ -156,6 +156,7 @@ pub async fn create_challenge(
     State(state): State<AppState>,
     Json(payload): Json<ChallengeRequest>,
 ) -> Result<(StatusCode, Json<ChallengeResponse>), PeerError> {
+    crate::observability::record_peer(payload.asn, None);
     let (nonce, expires_at) = state.authorizer.issue_challenge(payload.asn).await?;
     Ok((
         StatusCode::CREATED,
@@ -179,6 +180,7 @@ pub async fn get_peers(
     State(state): State<AppState>,
     Path(asn): Path<u32>,
 ) -> Result<Json<Vec<PeerInfo>>, PeerError> {
+    crate::observability::record_peer(asn, None);
     // Call the database directly since it does not modify BIRD or WG state.
     let peers = state.manager.get_peer_infos_by_asn(asn).await?;
     Ok(Json(peers))
@@ -201,6 +203,7 @@ pub async fn create_peer(
     Json(payload): Json<CreatePeerReq>,
 ) -> Result<(StatusCode, Json<PeerResponse>), PeerError> {
     let peer_name = parse_peer_name(&payload.peer_name)?;
+    crate::observability::record_peer(payload.asn, Some(&peer_name));
     let endpoint = parse_endpoint(payload.endpoint.as_deref())?;
     let link_local = parse_link_local(
         payload.manual_lla,
@@ -270,6 +273,7 @@ pub async fn update_peer(
     Json(payload): Json<UpdatePeerReq>,
 ) -> Result<Json<PeerResponse>, PeerError> {
     let peer_name = parse_peer_name(&payload.peer_name)?;
+    crate::observability::record_peer(payload.asn, Some(&peer_name));
     let endpoint = payload
         .endpoint
         .as_ref()
@@ -330,6 +334,7 @@ pub async fn delete_peer(
     Json(payload): Json<DeletePeerReq>,
 ) -> Result<Json<PeerResponse>, PeerError> {
     let peer_name = parse_peer_name(&payload.peer_name)?;
+    crate::observability::record_peer(payload.asn, Some(&peer_name));
     let message = crate::challenge::build_delete_message(
         payload.asn,
         &peer_name,

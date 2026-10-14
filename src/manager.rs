@@ -1,3 +1,4 @@
+use crate::observability::{LogError, ObserveResult, observe, observe_lock};
 use crate::{
     error::{BirdConfigIoSnafu, PeerError},
     netlink::WgManager,
@@ -65,6 +66,7 @@ impl PeerManager {
         }
     }
 
+    #[tracing::instrument(skip_all, fields(operation = "create", asn))]
     pub async fn create_peer(
         &self,
         asn: u32,
@@ -75,13 +77,13 @@ impl PeerManager {
         mtu: Option<u16>,
     ) -> Result<Peer, PeerError> {
         let operation_lock = self.operation_lock(asn, &peer_name);
-        let _operation_guard = operation_lock.lock().await;
+        let _operation_guard = observe_lock("peer_lock", &operation_lock).await;
         if self.db.peer_exists(asn, &peer_name).await? {
             return Err(PeerError::AlreadyExists { asn, peer_name });
         }
 
         let peer = {
-            let _port_guard = self.port_lock.lock().await;
+            let _port_guard = observe_lock("port_lock", &self.port_lock).await;
             self.reserve_peer(
                 asn,
                 peer_name,
@@ -121,6 +123,7 @@ impl PeerManager {
         })
     }
 
+    #[tracing::instrument(skip_all, fields(operation = "update", asn))]
     pub async fn update_peer(
         &self,
         asn: u32,
@@ -131,7 +134,7 @@ impl PeerManager {
         mtu: Option<Option<u16>>,
     ) -> Result<Peer, PeerError> {
         let operation_lock = self.operation_lock(asn, &peer_name);
-        let _operation_guard = operation_lock.lock().await;
+        let _operation_guard = observe_lock("peer_lock", &operation_lock).await;
         let old_peer =
             self.db
                 .get_peer(asn, &peer_name)
@@ -181,9 +184,10 @@ impl PeerManager {
         self.db.get_peer_infos_by_asn(asn).await
     }
 
+    #[tracing::instrument(skip_all, fields(operation = "delete", asn))]
     pub async fn delete_peer(&self, asn: u32, peer_name: String) -> Result<Peer, PeerError> {
         let operation_lock = self.operation_lock(asn, &peer_name);
-        let _operation_guard = operation_lock.lock().await;
+        let _operation_guard = observe_lock("peer_lock", &operation_lock).await;
         let peer = self
             .db
             .get_peer(asn, &peer_name)
@@ -225,6 +229,7 @@ impl PeerManager {
         Ok(peer)
     }
 
+    #[tracing::instrument(skip_all, fields(operation = "recover"))]
     pub async fn recover(&self) -> Result<(), PeerError> {
         let peers = self.db.list_peers().await?;
         let desired = peers
@@ -245,8 +250,10 @@ impl PeerManager {
             peer.status == PeerStatus::Deleting || peer.status == PeerStatus::Disabled
         }) {
             let operation_lock = self.operation_lock(peer.asn, &peer.peer_name);
-            let _operation_guard = operation_lock.lock().await;
-            WgManager::delete_interface(&peer.iface_name).await?;
+            let _operation_guard = observe_lock("peer_lock", &operation_lock).await;
+            WgManager::delete_interface(&peer.iface_name)
+                .observed("wireguard_remove")
+                .await?;
         }
 
         let desired_interfaces = desired
@@ -255,7 +262,9 @@ impl PeerManager {
             .collect::<HashSet<_>>();
         for iface_name in WgManager::list_managed_interfaces().await? {
             if !desired_interfaces.contains(iface_name.as_str()) {
-                WgManager::delete_interface(&iface_name).await?;
+                WgManager::delete_interface(&iface_name)
+                    .observed("wireguard_remove")
+                    .await?;
             }
         }
 
@@ -264,7 +273,9 @@ impl PeerManager {
                 && self.db.get_peer_by_id(change.peer.peer_id).await?.is_none()
                 && change.peer.iface_name == format!("wgp{}", change.peer.peer_id)
             {
-                WgManager::delete_interface(&change.peer.iface_name).await?;
+                WgManager::delete_interface(&change.peer.iface_name)
+                    .observed("wireguard_remove")
+                    .await?;
             }
         }
 
@@ -282,7 +293,7 @@ impl PeerManager {
 
         for peer in desired {
             let operation_lock = self.operation_lock(peer.asn, &peer.peer_name);
-            let _operation_guard = operation_lock.lock().await;
+            let _operation_guard = observe_lock("peer_lock", &operation_lock).await;
             if !self.db.set_status(peer.peer_id, PeerStatus::Active).await? {
                 return Err(PeerError::NotFound {
                     asn: peer.asn,
@@ -309,9 +320,14 @@ impl PeerManager {
                     }
                 },
                 Err(error) => {
-                    eprintln!(
-                        "Could not apply durable peer change {} ({}) for peer {}: {}",
-                        change.event_id, change.operation, change.peer.peer_name, error
+                    let info = error.log_info();
+                    tracing::error!(
+                        event = "peer_change_failed",
+                        event_id = change.event_id,
+                        peer_id = change.peer.peer_id,
+                        error_code = info.code,
+                        error_kind = info.kind,
+                        "Durable peer change failed"
                     );
                     if first_error.is_none() {
                         first_error = Some(error);
@@ -326,10 +342,11 @@ impl PeerManager {
         }
     }
 
+    #[tracing::instrument(skip_all, fields(event_id = change.event_id, peer_id = change.peer.peer_id))]
     async fn apply_peer_change(&self, change: &PeerChange) -> Result<(), PeerError> {
         let snapshot = &change.peer;
         let operation_lock = self.operation_lock(snapshot.asn, &snapshot.peer_name);
-        let _operation_guard = operation_lock.lock().await;
+        let _operation_guard = observe_lock("peer_lock", &operation_lock).await;
 
         match self.db.get_peer_by_id(snapshot.peer_id).await? {
             Some(peer) => {
@@ -369,7 +386,7 @@ impl PeerManager {
     }
 
     async fn sync_nft_ports_for(&self, peers: &[Peer]) -> Result<(), PeerError> {
-        let _guard = self.nft_sync_lock.lock().await;
+        let _guard = observe_lock("nft_lock", &self.nft_sync_lock).await;
         let mut ports = peers
             .iter()
             .filter(|peer| {
@@ -379,7 +396,9 @@ impl PeerManager {
             .collect::<Vec<_>>();
         ports.sort_unstable();
         ports.dedup();
-        run_nft_batch(&nft_port_batch(&ports)).await
+        run_nft_batch(&nft_port_batch(&ports))
+            .observed("nft_apply")
+            .await
     }
 
     async fn reserve_peer(
@@ -451,50 +470,109 @@ impl PeerManager {
     }
 
     async fn apply_peer(&self, peer: &Peer) -> Result<(), PeerError> {
-        self.apply_wireguard(peer).await?;
-        self.sync_bird_configs().await
+        self.apply_wireguard(peer)
+            .observed("wireguard_apply")
+            .await?;
+        self.sync_bird_configs().observed("bird_sync").await
     }
 
+    #[tracing::instrument(skip_all, fields(peer_id = peer.peer_id))]
     async fn apply_wireguard(&self, peer: &Peer) -> Result<(), PeerError> {
-        WgManager::ensure_wg_interface(&peer.iface_name, peer.peer_id, peer.mtu).await?;
+        WgManager::ensure_wg_interface(&peer.iface_name, peer.peer_id, peer.mtu)
+            .observed("wireguard_interface")
+            .await?;
         let endpoint = match peer.endpoint.as_deref() {
-            Some(endpoint) => Some(resolve_endpoint(endpoint).await?),
+            Some(endpoint) => Some(resolve_endpoint(endpoint).observed("endpoint_dns").await?),
             None => None,
         };
-        WgManager::configure_peer(
-            &peer.iface_name,
-            &self.local_wg_privkey,
-            peer.listen_port,
-            &peer.pubkey,
-            endpoint,
-        )?;
-        WgManager::configure_local_address(&peer.iface_name, peer.local_ll_ip).await?;
+        observe("wireguard_configure", async {
+            WgManager::configure_peer(
+                &peer.iface_name,
+                &self.local_wg_privkey,
+                peer.listen_port,
+                &peer.pubkey,
+                endpoint,
+            )
+        })
+        .await?;
+        WgManager::configure_local_address(&peer.iface_name, peer.local_ll_ip)
+            .observed("wireguard_address")
+            .await?;
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(operation = "compensate_create", peer_id = peer.peer_id))]
     async fn compensate_failed_create(&self, peer: &Peer) {
-        let _ = self.db.set_status(peer.peer_id, PeerStatus::Deleting).await;
-        if self.remove_external_state(peer).await.is_ok() {
-            let _ = self.db.delete_peer(peer.peer_id).await;
-        }
-        let _ = self.sync_nft_ports().await;
+        tracing::warn!(
+            event = "peer_compensation_started",
+            "Peer creation compensation started"
+        );
+        let marked = matches!(
+            self.db.set_status(peer.peer_id, PeerStatus::Deleting).await,
+            Ok(true)
+        );
+        let removed = self
+            .remove_external_state(peer)
+            .observed("peer_cleanup")
+            .await
+            .is_ok();
+        let deleted = if removed {
+            matches!(self.db.delete_peer(peer.peer_id).await, Ok(true))
+        } else {
+            false
+        };
+        let synced = self.sync_nft_ports().observed("nft_sync").await.is_ok();
+        tracing::warn!(
+            event = "peer_compensation_completed",
+            complete = marked && removed && deleted && synced,
+            "Peer creation compensation completed"
+        );
     }
 
+    #[tracing::instrument(skip_all, fields(operation = "compensate_update", peer_id = old_peer.peer_id))]
     async fn compensate_failed_update(&self, old_peer: &Peer) {
-        if self.db.update_peer_desired(old_peer).await.is_err() {
-            return;
-        }
-        if self.apply_peer(old_peer).await.is_ok() {
-            let _ = self
-                .db
-                .set_status(old_peer.peer_id, PeerStatus::Active)
-                .await;
-        }
+        tracing::warn!(
+            event = "peer_compensation_started",
+            "Peer update compensation started"
+        );
+        let restored = match self.db.update_peer_desired(old_peer).await {
+            Ok(restored) => restored,
+            Err(_) => {
+                tracing::warn!(
+                    event = "peer_compensation_completed",
+                    complete = false,
+                    "Peer update compensation incomplete"
+                );
+                return;
+            }
+        };
+        let applied = self
+            .apply_peer(old_peer)
+            .observed("peer_restore")
+            .await
+            .is_ok();
+        let activated = if applied {
+            matches!(
+                self.db
+                    .set_status(old_peer.peer_id, PeerStatus::Active)
+                    .await,
+                Ok(true)
+            )
+        } else {
+            false
+        };
+        tracing::warn!(
+            event = "peer_compensation_completed",
+            complete = restored && applied && activated,
+            "Peer update compensation completed"
+        );
     }
 
     async fn remove_external_state(&self, peer: &Peer) -> Result<(), PeerError> {
         self.sync_bird_configs().await?;
-        WgManager::delete_interface(&peer.iface_name).await
+        WgManager::delete_interface(&peer.iface_name)
+            .observed("wireguard_remove")
+            .await
     }
 
     async fn sync_bird_configs(&self) -> Result<(), PeerError> {
@@ -507,7 +585,7 @@ impl PeerManager {
         peers: &[Peer],
         force_reload: bool,
     ) -> Result<(), PeerError> {
-        let _guard = self.bird_sync_lock.lock().await;
+        let _guard = observe_lock("bird_lock", &self.bird_sync_lock).await;
         self.ensure_bird_layout().await?;
 
         let mut desired = BTreeMap::new();
@@ -539,7 +617,7 @@ impl PeerManager {
 
         if self.current_generation_matches(&desired).await? {
             return if force_reload {
-                self.reload_bird().await
+                self.reload_bird().observed("bird_reload").await
             } else {
                 Ok(())
             };
@@ -554,6 +632,7 @@ impl PeerManager {
             })?;
         for (file_name, content) in &desired {
             self.write_atomic(&generation_path.join(file_name), content)
+                .observed("bird_write")
                 .await?;
         }
         sync_directory(&generation_path).await?;
@@ -563,7 +642,7 @@ impl PeerManager {
         self.switch_current(Path::new("generations").join(&generation_name))
             .await?;
 
-        if let Err(reload_error) = self.reload_bird().await {
+        if let Err(reload_error) = self.reload_bird().observed("bird_reload").await {
             let restore_result = match old_target {
                 Some(target) => self.switch_current(target).await,
                 None => remove_optional(&current_path).await,
@@ -575,7 +654,7 @@ impl PeerManager {
                     ),
                 });
             }
-            let _ = self.reload_bird().await;
+            let _ = self.reload_bird().observed("bird_reload").await;
             return Err(reload_error);
         }
 

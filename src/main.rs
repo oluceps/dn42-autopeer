@@ -2,17 +2,20 @@ use axum::{
     Router,
     routing::{get, post},
 };
+use observability::{ObserveResult, log_failure};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
+use tracing::Instrument;
 
 mod challenge;
 mod error;
 mod handle;
 mod manager;
 mod netlink;
+mod observability;
 mod peer;
 mod persist;
 mod template;
@@ -28,14 +31,19 @@ use wireguard_control::Key;
 
 #[tokio::main]
 async fn main() {
-    println!("Initializing DN42 Autopeer Web Server...");
+    observability::init();
+    tracing::info!(
+        event = "startup",
+        version = env!("CARGO_PKG_VERSION"),
+        "Server started"
+    );
 
     let bird_conf_dir =
         std::env::var("BIRD_CONF_DIR").unwrap_or_else(|_| "/run/dn42-autopeer".to_string());
 
     std::fs::create_dir_all(&bird_conf_dir).expect("Failed to create the BIRD config directory");
 
-    println!("Using BIRD config dir: {}", bird_conf_dir);
+    tracing::info!(event = "bird_config_directory", path = %bird_conf_dir, "BIRD configuration directory selected");
 
     let (wg_privkey, wg_pubkey) = load_wg_keypair();
     let public_endpoint =
@@ -66,6 +74,7 @@ async fn main() {
     ));
     peer_manager
         .recover()
+        .observed("startup_recovery")
         .await
         .expect("Failed to recover peer state");
 
@@ -76,9 +85,18 @@ async fn main() {
         interval.tick().await;
         loop {
             interval.tick().await;
-            if let Err(error) = nft_reconciler.sync_nft_ports().await {
-                eprintln!("Could not synchronize nftables ports: {error}");
+            let span = tracing::info_span!("background_job", job = "nft_reconcile");
+            async {
+                if let Err(error) = nft_reconciler
+                    .sync_nft_ports()
+                    .observed("nft_reconcile")
+                    .await
+                {
+                    log_failure("nft_reconcile_failed", &error);
+                }
             }
+            .instrument(span)
+            .await;
         }
     });
 
@@ -93,7 +111,10 @@ async fn main() {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .expose_headers([axum::http::HeaderName::from_static(
+            observability::REQUEST_ID_HEADER,
+        )]);
 
     let app = Router::new()
         .route("/api/challenges", post(create_challenge))
@@ -104,6 +125,7 @@ async fn main() {
         )
         .route("/api-docs/openapi.json", get(openapi_json))
         .with_state(state)
+        .layer(axum::middleware::from_fn(observability::log_request))
         .layer(cors);
 
     let port: u16 = std::env::var("PORT")
@@ -111,38 +133,48 @@ async fn main() {
         .parse()
         .expect("PORT must be a valid u16 integer");
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    println!("Listening on http://{}", addr);
-    println!(
-        "OpenAPI specification available at http://{}/api-docs/openapi.json",
-        addr
-    );
-
     let listener = TcpListener::bind(addr).await.unwrap();
+    tracing::info!(event = "server_listening", address = %addr, local_asn, "Server listens for requests");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
 }
 
+#[tracing::instrument(skip_all, fields(job = "peer_change_listener"))]
 async fn run_peer_change_listener(pool: sqlx::PgPool, manager: Arc<PeerManager>) {
     loop {
-        let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
+        let mut listener = match sqlx::postgres::PgListener::connect_with(&pool)
+            .observed("db_listener_connect")
+            .await
+        {
             Ok(listener) => listener,
             Err(error) => {
-                eprintln!("Could not connect to the peer-change listener: {error}");
+                log_failure("db_listener_connect_failed", &error);
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
-        if let Err(error) = listener.listen("peer_changes").await {
-            eprintln!("Could not listen for peer changes: {error}");
+        if let Err(error) = listener
+            .listen("peer_changes")
+            .observed("db_listener_subscribe")
+            .await
+        {
+            log_failure("db_listener_subscribe_failed", &error);
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
 
-        println!("Listening for peer changes via PostgreSQL NOTIFY...");
-        if let Err(error) = manager.sync_pending_peer_changes().await {
-            eprintln!("Could not synchronize pending peer changes: {error}");
+        tracing::info!(
+            event = "db_listener_ready",
+            "Database change listener ready"
+        );
+        if let Err(error) = manager
+            .sync_pending_peer_changes()
+            .observed("peer_change_sync")
+            .await
+        {
+            log_failure("peer_change_sync_failed", &error);
         }
 
         let mut retry = tokio::time::interval(Duration::from_secs(30));
@@ -152,22 +184,27 @@ async fn run_peer_change_listener(pool: sqlx::PgPool, manager: Arc<PeerManager>)
             tokio::select! {
                 notification = listener.recv() => match notification {
                     Ok(_) => {
-                        if let Err(error) = manager.sync_pending_peer_changes().await {
-                            eprintln!("Could not synchronize pending peer changes: {error}");
+                        if let Err(error) = manager.sync_pending_peer_changes().observed("peer_change_sync").await {
+                            log_failure("peer_change_sync_failed", &error);
                         }
                     }
                     Err(error) => {
-                        eprintln!("Database listener error: {error}");
+                        log_failure("db_listener_disconnected", &error);
                         break;
                     }
                 },
                 _ = retry.tick() => {
-                    if let Err(error) = manager.sync_pending_peer_changes().await {
-                        eprintln!("Could not retry pending peer changes: {error}");
+                    if let Err(error) = manager.sync_pending_peer_changes().observed("peer_change_retry").await {
+                        log_failure("peer_change_retry_failed", &error);
                     }
                 }
             }
         }
+        tracing::warn!(
+            event = "db_listener_reconnecting",
+            retry_after_secs = 5,
+            "Database listener reconnect pending"
+        );
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
@@ -209,5 +246,5 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-    println!("Shutdown signal received, starting graceful shutdown...");
+    tracing::info!(event = "shutdown", "Shutdown signal received");
 }

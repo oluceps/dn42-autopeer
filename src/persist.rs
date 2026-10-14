@@ -1,9 +1,10 @@
+use crate::observability::ObserveResult;
 use crate::{
     error::PeerError,
     peer::{Peer, PeerStatus},
     wg_pubkey::WgPubKey,
 };
-use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{ConnectOptions, PgPool, Row, postgres::PgPoolOptions};
 use std::{env, str::FromStr};
 
 #[derive(Clone)]
@@ -33,14 +34,16 @@ impl PeerStore {
         {
             opts = opts.host(&host[1..host.len() - 1]);
         }
-        Ok(opts)
+        Ok(opts.disable_statement_logging())
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "startup"))]
     pub async fn new() -> Result<Self, PeerError> {
         let opts = Self::get_opts()?;
         let pool = PgPoolOptions::new()
             .max_connections(10)
             .connect_with(opts)
+            .observed("db_connect")
             .await
             .map_err(|source| PeerError::Database { source })?;
 
@@ -65,6 +68,7 @@ impl PeerStore {
             "#,
         )
         .execute(&pool)
+        .observed("db_schema")
         .await
         .map_err(|source| PeerError::Database { source })?;
 
@@ -79,6 +83,7 @@ impl PeerStore {
             "#,
         )
         .execute(&pool)
+        .observed("db_schema")
         .await
         .map_err(|source| PeerError::Database { source })?;
 
@@ -103,6 +108,7 @@ impl PeerStore {
             "#,
         )
         .execute(&pool)
+        .observed("db_schema")
         .await
         .map_err(|source| PeerError::Database { source })?;
 
@@ -139,6 +145,7 @@ impl PeerStore {
             "#,
         )
         .execute(&pool)
+        .observed("db_schema")
         .await
         .map_err(|source| PeerError::Database { source })?;
 
@@ -162,21 +169,38 @@ impl PeerStore {
             "#,
         )
         .execute(&pool)
+        .observed("db_schema")
         .await
         .map_err(|source| PeerError::Database { source })?;
 
         Ok(Self { pool })
     }
 
+    #[tracing::instrument(skip_all, fields(
+        pool_size = self.pool.size(),
+        pool_idle = self.pool.num_idle(),
+        pool_max = self.pool.options().get_max_connections(),
+    ))]
+    async fn acquire(&self) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, PeerError> {
+        self.pool
+            .acquire()
+            .observed("db_acquire")
+            .await
+            .map_err(|source| PeerError::Database { source })
+    }
+
+    #[tracing::instrument(skip_all, fields(db_operation = "insert_nonce"))]
     pub async fn insert_nonce(
         &self,
         asn: u32,
         nonce: &str,
         expires_at: i64,
     ) -> Result<bool, PeerError> {
+        let mut connection = self.acquire().await?;
         sqlx::query("DELETE FROM auth_nonces WHERE expires_at < $1")
             .bind(unix_timestamp())
-            .execute(&self.pool)
+            .execute(&mut *connection)
+            .observed("db_query")
             .await
             .map_err(|source| PeerError::Database { source })?;
 
@@ -186,18 +210,21 @@ impl PeerStore {
         .bind(nonce)
         .bind(asn as i64)
         .bind(expires_at)
-        .execute(&self.pool)
+        .execute(&mut *connection)
+        .observed("db_query")
         .await
         .map_err(|source| PeerError::Database { source })?;
         Ok(result.rows_affected() == 1)
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "consume_nonce"))]
     pub async fn consume_nonce(
         &self,
         asn: u32,
         nonce: &str,
         expires_at: i64,
     ) -> Result<bool, PeerError> {
+        let mut connection = self.acquire().await?;
         let result = sqlx::query(
             r#"
             DELETE FROM auth_nonces
@@ -208,13 +235,16 @@ impl PeerStore {
         .bind(asn as i64)
         .bind(expires_at)
         .bind(unix_timestamp())
-        .execute(&self.pool)
+        .execute(&mut *connection)
+        .observed("db_query")
         .await
         .map_err(|source| PeerError::Database { source })?;
         Ok(result.rows_affected() == 1)
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "reserve_peer"))]
     pub async fn reserve_peer(&self, peer: &Peer) -> Result<bool, PeerError> {
+        let mut connection = self.acquire().await?;
         let result = sqlx::query(
             r#"
             INSERT INTO peers
@@ -233,15 +263,19 @@ impl PeerStore {
         .bind(peer.remote_ll_ip.to_string())
         .bind(peer.listen_port as i32)
         .bind(peer.mtu as i32)
-        .execute(&self.pool)
+        .execute(&mut *connection)
+        .observed("db_query")
         .await
         .map_err(|source| PeerError::Database { source })?;
         Ok(result.rows_affected() == 1)
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "allocate_peer_id"))]
     pub async fn allocate_peer_id(&self) -> Result<u32, PeerError> {
+        let mut connection = self.acquire().await?;
         let (peer_id,): (i64,) = sqlx::query_as("SELECT nextval('peers_peer_id_seq')")
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *connection)
+            .observed("db_query")
             .await
             .map_err(|source| PeerError::Database { source })?;
         u32::try_from(peer_id).map_err(|_| PeerError::Validation {
@@ -249,7 +283,9 @@ impl PeerStore {
         })
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "update_peer_desired"))]
     pub async fn update_peer_desired(&self, peer: &Peer) -> Result<bool, PeerError> {
+        let mut connection = self.acquire().await?;
         let result = sqlx::query(
             r#"
             UPDATE peers SET
@@ -273,46 +309,58 @@ impl PeerStore {
         .bind(peer.remote_ll_ip.to_string())
         .bind(peer.listen_port as i32)
         .bind(peer.mtu as i32)
-        .execute(&self.pool)
+        .execute(&mut *connection)
+        .observed("db_query")
         .await
         .map_err(|source| PeerError::Database { source })?;
         Ok(result.rows_affected() == 1)
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "set_status"))]
     pub async fn set_status(&self, peer_id: u32, status: PeerStatus) -> Result<bool, PeerError> {
+        let mut connection = self.acquire().await?;
         let status = status_to_str(&status);
         let result = sqlx::query(
             "UPDATE peers SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE peer_id = $1",
         )
         .bind(peer_id as i32)
         .bind(status)
-        .execute(&self.pool)
+        .execute(&mut *connection)
+        .observed("db_query")
         .await
         .map_err(|source| PeerError::Database { source })?;
         Ok(result.rows_affected() == 1)
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "delete_peer"))]
     pub async fn delete_peer(&self, peer_id: u32) -> Result<bool, PeerError> {
+        let mut connection = self.acquire().await?;
         let result = sqlx::query("DELETE FROM peers WHERE peer_id = $1")
             .bind(peer_id as i32)
-            .execute(&self.pool)
+            .execute(&mut *connection)
+            .observed("db_query")
             .await
             .map_err(|source| PeerError::Database { source })?;
         Ok(result.rows_affected() > 0)
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "peer_exists"))]
     pub async fn peer_exists(&self, asn: u32, peer_name: &str) -> Result<bool, PeerError> {
+        let mut connection = self.acquire().await?;
         let (exists,): (bool,) =
             sqlx::query_as("SELECT EXISTS(SELECT 1 FROM peers WHERE asn = $1 AND peer_name = $2)")
                 .bind(asn as i64)
                 .bind(peer_name)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *connection)
+                .observed("db_query")
                 .await
                 .map_err(|source| PeerError::Database { source })?;
         Ok(exists)
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "get_peer"))]
     pub async fn get_peer(&self, asn: u32, peer_name: &str) -> Result<Option<Peer>, PeerError> {
+        let mut connection = self.acquire().await?;
         let row = sqlx::query(
             r#"
             SELECT peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port, mtu
@@ -321,13 +369,16 @@ impl PeerStore {
         )
         .bind(asn as i64)
         .bind(peer_name)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
+        .observed("db_query")
         .await
         .map_err(|source| PeerError::Database { source })?;
         row.map(row_to_peer).transpose()
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "get_peer_by_id"))]
     pub async fn get_peer_by_id(&self, peer_id: u32) -> Result<Option<Peer>, PeerError> {
+        let mut connection = self.acquire().await?;
         let row = sqlx::query(
             r#"
             SELECT peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port, mtu
@@ -335,29 +386,35 @@ impl PeerStore {
             "#,
         )
         .bind(peer_id as i32)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
+        .observed("db_query")
         .await
         .map_err(|source| PeerError::Database { source })?;
         row.map(row_to_peer).transpose()
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "list_peers"))]
     pub async fn list_peers(&self) -> Result<Vec<Peer>, PeerError> {
+        let mut connection = self.acquire().await?;
         let rows = sqlx::query(
             r#"
             SELECT peer_id, asn, peer_name, iface_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port, mtu
             FROM peers ORDER BY asn, peer_name
             "#,
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
+        .observed("db_query")
         .await
         .map_err(|source| PeerError::Database { source })?;
         rows.into_iter().map(row_to_peer).collect()
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "get_peer_infos_by_asn"))]
     pub async fn get_peer_infos_by_asn(
         &self,
         asn: u32,
     ) -> Result<Vec<crate::handle::PeerInfo>, PeerError> {
+        let mut connection = self.acquire().await?;
         let rows = sqlx::query(
             r#"
             SELECT peer_name, pubkey, endpoint, local_ll_ip, remote_ll_ip, status, listen_port, mtu,
@@ -367,7 +424,8 @@ impl PeerStore {
             "#,
         )
         .bind(asn as i64)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
+        .observed("db_query")
         .await
         .map_err(|source| PeerError::Database { source })?;
 
@@ -389,7 +447,9 @@ impl PeerStore {
         Ok(infos)
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "list_peer_changes"))]
     pub async fn list_peer_changes(&self) -> Result<Vec<PeerChange>, PeerError> {
+        let mut connection = self.acquire().await?;
         let rows = sqlx::query(
             r#"
             SELECT event_id, operation, peer_id, asn, peer_name, iface_name, pubkey, endpoint,
@@ -398,7 +458,8 @@ impl PeerStore {
             ORDER BY event_id
             "#,
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
+        .observed("db_query")
         .await
         .map_err(|source| PeerError::Database { source })?;
 
@@ -416,10 +477,13 @@ impl PeerStore {
             .collect()
     }
 
+    #[tracing::instrument(skip_all, fields(db_operation = "delete_peer_change"))]
     pub async fn delete_peer_change(&self, event_id: i64) -> Result<bool, PeerError> {
+        let mut connection = self.acquire().await?;
         let result = sqlx::query("DELETE FROM peer_change_events WHERE event_id = $1")
             .bind(event_id)
-            .execute(&self.pool)
+            .execute(&mut *connection)
+            .observed("db_query")
             .await
             .map_err(|source| PeerError::Database { source })?;
         Ok(result.rows_affected() == 1)

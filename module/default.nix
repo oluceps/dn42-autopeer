@@ -49,6 +49,12 @@ in
       description = "Your local DN42 ASN (e.g. 4242420291).";
     };
 
+    logFilter = mkOption {
+      type = types.str;
+      default = "warn,dn42_autopeer=info,sqlx=off,reqwest=off";
+      description = "The RUST_LOG filter for structured JSON logs.";
+    };
+
     registryApiUrl = mkOption {
       type = types.str;
       default = "https://explorer.burble.com/api/registry";
@@ -106,7 +112,7 @@ in
         BIRD_CONF_DIR = cfg.birdConfDir;
         LOCAL_ASN = toString cfg.localAsn;
         REGISTRY_API_URL = cfg.registryApiUrl;
-        RUST_LOG = "info";
+        RUST_LOG = cfg.logFilter;
       };
 
       serviceConfig = {

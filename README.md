@@ -306,10 +306,46 @@ The service does not install kernel routes for these prefixes.
 | `REGISTRY_API_URL` | DN42 Registry API base URL | `https://explorer.burble.com/api/registry` |
 | `REGISTRY_TIMEOUT_SECS` | Registry connect, read, and total timeout | `10` |
 | `REGISTRY_MAX_CONCURRENT` | Maximum concurrent registry checks | `16` |
+| `RUST_LOG` | JSON log filter | `warn,dn42_autopeer=info,sqlx=off,reqwest=off` |
 
 Startup fails if either WireGuard key is absent or invalid.
 Startup also fails if the public key does not match the private key.
 The service does not write `DATABASE_URL` to its logs.
+
+## Logs
+
+The server writes structured JSON events to stdout. Each request gets a generated `X-Request-ID` response header.
+The `http_request` span contains the request ID, method, matched route, and a valid `CF-Ray` header when present.
+It also contains the ASN and validated peer name when available. Query strings and unmatched paths are omitted.
+
+At the default level, logs show request start, response status, total elapsed milliseconds, and failures.
+Stages that take at least one second emit a warning. Pending stages emit a warning every five seconds.
+Requests that take at least five seconds also emit a warning. Interrupted futures emit an interruption event.
+An interruption does not prove that the browser disconnected.
+
+Set `RUST_LOG=warn,dn42_autopeer=debug,sqlx=off,reqwest=off` to see fast stage start and completion events.
+On NixOS, set `services.autopeer.logFilter` to this value.
+Stages cover database connection acquisition and queries, registry HTTP requests, lock waits, endpoint DNS, WireGuard, BIRD, and nftables.
+Database acquisition spans include pool size, idle connections, and the connection limit.
+Errors include a stable code, error kind, and available SQLSTATE, OS error code, or registry HTTP status.
+Background events identify the reconciliation job or durable peer-change event.
+
+Application events omit request bodies, auth keys, signatures, nonces, WireGuard keys, database URLs, and raw error details.
+SQL statement logs are disabled. Keep third-party trace logs disabled on production systems.
+
+To read the JSON events on NixOS:
+
+```bash
+journalctl -u autopeer -o cat | jq -R 'fromjson?'
+```
+
+To select one request:
+
+```bash
+journalctl -u autopeer -o cat | jq -R 'fromjson? | select(any(.spans[]?; .request_id == "REQUEST_ID"))'
+```
+
+These changes do not increase request timeouts or retry peer mutations.
 
 ## Run locally
 
