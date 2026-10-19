@@ -60,6 +60,24 @@ in
       default = "https://explorer.burble.com/api/registry";
       description = "The URL of the DN42 registry API for verifying E2E challenges.";
     };
+
+    databaseSocket = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "Path to the PostgreSQL Unix domain socket or socket directory.";
+    };
+
+    databaseName = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "PostgreSQL database name override.";
+    };
+
+    databaseUser = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "PostgreSQL database user override.";
+    };
   };
 
   config = mkIf cfg.enable {
@@ -83,6 +101,12 @@ in
     networking.firewall.extraInputRules = mkAfter ''
       udp dport @autopeer-ports accept comment "DN42 autopeer WireGuard"
     '';
+
+    users.groups.autopeer = { };
+    users.users.autopeer = {
+      isSystemUser = true;
+      group = "autopeer";
+    };
 
     systemd.tmpfiles.rules = [
       "d ${cfg.birdConfDir} 2770 bird bird -"
@@ -113,6 +137,9 @@ in
         LOCAL_ASN = toString cfg.localAsn;
         REGISTRY_API_URL = cfg.registryApiUrl;
         RUST_LOG = cfg.logFilter;
+        DATABASE_SOCKET = lib.mkIf (cfg.databaseSocket != null) cfg.databaseSocket;
+        DATABASE_NAME = lib.mkIf (cfg.databaseName != null) cfg.databaseName;
+        DATABASE_USER = lib.mkIf (cfg.databaseUser != null) cfg.databaseUser;
       };
 
       serviceConfig = {
@@ -125,13 +152,21 @@ in
         UMask = "0007";
 
         # Security Hardening
-        DynamicUser = true;
+        DynamicUser = false;
+        User = "autopeer";
+        Group = "autopeer";
         # Need to be in the same group as BIRD to access its control socket (/run/bird/bird.ctl)
         SupplementaryGroups = [ "bird" ];
 
         # NET_ADMIN is exactly what is needed for netlink (adding/removing WG interfaces)
         AmbientCapabilities = [ "CAP_NET_ADMIN" ];
         CapabilityBoundingSet = [ "CAP_NET_ADMIN" ];
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+          "AF_INET"
+          "AF_INET6"
+          "AF_NETLINK"
+        ];
         ReadWritePaths = [ cfg.birdConfDir ];
       };
     };

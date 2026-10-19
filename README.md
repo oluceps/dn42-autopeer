@@ -297,6 +297,9 @@ The service does not install kernel routes for these prefixes.
 |---|---|---|
 | `PORT` | HTTP listen port | `8080` |
 | `DATABASE_URL` | PostgreSQL connection string | `postgres://dn42-bot@localhost/dn42` |
+| `DATABASE_SOCKET` | PostgreSQL Unix socket directory or `.s.PGSQL.*` path | Unset |
+| `DATABASE_USER` | PostgreSQL user override | Unset |
+| `DATABASE_NAME` | PostgreSQL database name override | Unset |
 | `BIRD_CONF_DIR` | BIRD generation root | `/run/dn42-autopeer` |
 | `BIRD_SOCKET` | BIRD control socket | `/run/bird/bird.ctl` |
 | `WG_PRIVATE_KEY` | Local WireGuard private key | Required |

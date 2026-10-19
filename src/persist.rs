@@ -4,8 +4,11 @@ use crate::{
     peer::{Peer, PeerStatus},
     wg_pubkey::WgPubKey,
 };
-use sqlx::{ConnectOptions, PgPool, Row, postgres::PgPoolOptions};
-use std::{env, str::FromStr};
+use sqlx::{
+    ConnectOptions, PgPool, Row,
+    postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
+};
+use std::{env, path::Path, str::FromStr};
 
 #[derive(Clone)]
 pub struct PeerStore {
@@ -20,20 +23,61 @@ pub struct PeerChange {
 }
 
 impl PeerStore {
-    pub fn get_opts() -> Result<sqlx::postgres::PgConnectOptions, PeerError> {
-        let db_url = env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://dn42-bot@localhost/dn42".to_string());
+    pub fn get_opts() -> Result<PgConnectOptions, PeerError> {
+        Self::build_connect_options(
+            env::var("DATABASE_URL").ok().as_deref(),
+            env::var("DATABASE_SOCKET").ok().as_deref(),
+            env::var("DATABASE_USER").ok().as_deref(),
+            env::var("DATABASE_NAME").ok().as_deref(),
+        )
+    }
 
-        let mut opts = sqlx::postgres::PgConnectOptions::from_str(&db_url)
-            .map_err(|source| PeerError::Database { source })?;
+    fn build_connect_options(
+        db_url: Option<&str>,
+        db_socket: Option<&str>,
+        db_user: Option<&str>,
+        db_name: Option<&str>,
+    ) -> Result<PgConnectOptions, PeerError> {
+        let raw_url = db_url
+            .filter(|value| !value.is_empty())
+            .unwrap_or("postgres://dn42-bot@localhost/dn42");
 
-        if let Ok(parsed_url) = url::Url::parse(&db_url)
+        let mut opts =
+            PgConnectOptions::from_str(raw_url).map_err(|source| PeerError::Database { source })?;
+
+        if let Ok(parsed_url) = url::Url::parse(raw_url)
             && let Some(host) = parsed_url.host_str()
             && host.starts_with('[')
             && host.ends_with(']')
         {
             opts = opts.host(&host[1..host.len() - 1]);
         }
+
+        if let Some(socket) = db_socket.filter(|value| !value.is_empty()) {
+            let path = Path::new(socket);
+            if let Some(file_name) = path.file_name().and_then(|name| name.to_str())
+                && let Some(port_str) = file_name.strip_prefix(".s.PGSQL.")
+                && let Ok(port) = port_str.parse::<u16>()
+                && let Some(parent) = path.parent()
+            {
+                opts = opts.socket(parent).port(port);
+            } else {
+                opts = opts.socket(path);
+            }
+            opts = opts.ssl_mode(PgSslMode::Disable);
+        } else if (opts.get_socket().is_some() || opts.get_host().starts_with('/'))
+            && !raw_url.contains("sslmode=")
+        {
+            opts = opts.ssl_mode(PgSslMode::Disable);
+        }
+
+        if let Some(user) = db_user.filter(|value| !value.is_empty()) {
+            opts = opts.username(user);
+        }
+        if let Some(name) = db_name.filter(|value| !value.is_empty()) {
+            opts = opts.database(name);
+        }
+
         Ok(opts.disable_statement_logging())
     }
 
@@ -558,4 +602,50 @@ fn unix_timestamp() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PeerStore;
+    use sqlx::postgres::PgSslMode;
+    use std::path::Path;
+
+    #[test]
+    fn socket_override_replaces_tcp_url_and_disables_ssl() {
+        let opts = PeerStore::build_connect_options(
+            Some("postgres://dn42:secret@[fdcc::3]:5432/dn42abhoth"),
+            Some("/run/realm/autopeer/egress"),
+            Some("dn42"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            opts.get_socket().map(std::path::PathBuf::as_path),
+            Some(Path::new("/run/realm/autopeer/egress"))
+        );
+        assert_eq!(opts.get_username(), "dn42");
+        assert_eq!(opts.get_database(), Some("dn42abhoth"));
+        assert!(matches!(opts.get_ssl_mode(), PgSslMode::Disable));
+    }
+
+    #[test]
+    fn socket_file_path_extracts_parent_directory_and_port() {
+        let opts = PeerStore::build_connect_options(
+            None,
+            Some("/run/realm/autopeer/egress/.s.PGSQL.5432"),
+            Some("dn42"),
+            Some("dn42nodens"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            opts.get_socket().map(std::path::PathBuf::as_path),
+            Some(Path::new("/run/realm/autopeer/egress"))
+        );
+        assert_eq!(opts.get_port(), 5432);
+        assert_eq!(opts.get_username(), "dn42");
+        assert_eq!(opts.get_database(), Some("dn42nodens"));
+        assert!(matches!(opts.get_ssl_mode(), PgSslMode::Disable));
+    }
 }
