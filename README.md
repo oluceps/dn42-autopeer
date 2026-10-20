@@ -178,6 +178,33 @@ The endpoint is optional and can contain an IP address or hostname.
 The default MTU is 1420.
 Automatic link-local addresses follow the mapping above.
 
+### Test peer creation with your own ASN
+
+Requests to `POST /api/peers` with an ASN equal to `LOCAL_ASN` run a peer creation test.
+The default test ASN is `4242420291`.
+The request still needs a valid challenge, signature, and Registry authorization.
+The service checks peer identity and port availability, renders the BIRD template, and inserts the peer inside a database transaction.
+It then rolls back the transaction, including trigger events and notifications, before it returns.
+It does not apply WireGuard, BIRD, or nftables configuration for this request.
+
+The response keeps HTTP `201` and the existing response fields.
+It sets `status` to `test` and explains the rollback in `message`.
+The returned peer ID and configuration describe the test reservation. They do not identify an active peer.
+The test consumes the challenge nonce and can leave gaps in database ID sequences.
+Use distinct manual link-local addresses to test an address pair for your own ASN.
+This test does not check endpoint DNS, BIRD configuration loading, WireGuard handshakes, or BGP sessions.
+Update and delete requests retain their existing behavior.
+
+The database tests need an empty test PostgreSQL database.
+Run them with `DATABASE_URL` set to that database:
+
+```bash
+MOCK_NETLINK=1 cargo test -- --ignored --skip link_dump --test-threads=1
+```
+
+These tests check rollback, trigger events, notifications, database conflicts, and the API response.
+The API response test uses the existing debug authentication fixture.
+
 ### Update a peer
 
 `PATCH /api/peers` can replace the WireGuard public key, endpoint, link-local addresses, and MTU.

@@ -233,11 +233,17 @@ pub async fn create_peer(
             payload.mtu,
         )
         .await?;
+    let test = payload.asn == state.manager.local_asn;
     Ok((
         StatusCode::CREATED,
         Json(PeerResponse {
-            status: "success".to_string(),
-            message: "The server configured the peer in BIRD and the kernel".to_string(),
+            status: if test { "test" } else { "success" }.to_string(),
+            message: if test {
+                "Peer test passed. The database reservation was rolled back. No WireGuard, BIRD, or firewall configuration was applied."
+            } else {
+                "The server configured the peer in BIRD and the kernel"
+            }
+            .to_string(),
             peer_id: peer.peer_id,
             peer_name: peer.peer_name.clone(),
             wg_config: Some(WgConfig {
@@ -498,6 +504,102 @@ pub struct ApiDoc;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "Requires an empty test PostgreSQL database and MOCK_NETLINK=1"]
+    async fn self_peer_response_keeps_schema_without_external_state() {
+        use crate::persist::PeerStore;
+        use axum::{
+            Router,
+            body::{Body, to_bytes},
+            http::Request,
+            routing::post,
+        };
+        use tower::ServiceExt;
+
+        assert!(std::env::var("MOCK_NETLINK").is_ok());
+        let store = PeerStore::new().await.unwrap();
+        assert!(store.list_peers().await.unwrap().is_empty());
+        assert!(store.list_peer_changes().await.unwrap().is_empty());
+        let root = std::env::temp_dir().join(format!("autopeer-self-test-{}", std::process::id()));
+        assert!(!root.exists());
+        let manager = Arc::new(crate::manager::PeerManager::new(
+            store.clone(),
+            root.to_str().unwrap().to_string(),
+            root.join("missing-bird.ctl").to_str().unwrap().to_string(),
+            String::new(),
+            "server-public-key".to_string(),
+            "node.example.net".to_string(),
+            4242420291,
+        ));
+        let app = Router::new()
+            .route("/api/peers", post(create_peer))
+            .with_state(AppState {
+                manager: manager.clone(),
+                authorizer: RequestAuthorizer::new(store.clone()).unwrap(),
+            });
+        for manual in [false, true] {
+            let mut payload = serde_json::json!({
+                "asn": 4242420291_u32,
+                "peer_name": "self-test",
+                "pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "challenge": {"auth": "a", "signature": "s", "nonce": "dummy_nonce", "expires_at": 9999999999_i64}
+            });
+            if manual {
+                payload["manual_lla"] = true.into();
+                payload["local_ll_ip"] = "fe80::1".into();
+                payload["remote_ll_ip"] = "fe80::2".into();
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/peers")
+                        .header("content-type", "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 16384).await.unwrap())
+                    .unwrap();
+            let mut keys = body
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "bgp_config",
+                    "message",
+                    "peer_id",
+                    "peer_name",
+                    "status",
+                    "wg_config"
+                ]
+            );
+            assert_eq!(body["status"], "test");
+            assert!(body["message"].as_str().unwrap().contains("rolled back"));
+            assert_eq!(body["peer_name"], "self-test");
+            assert!(body["peer_id"].as_u64().unwrap() > 0);
+            assert_eq!(body["bgp_config"]["my_asn"], 4242420291_u32);
+            if manual {
+                assert_eq!(body["wg_config"]["your_assigned_ip"], "fe80::2/64");
+                assert_eq!(body["bgp_config"]["my_neighbor_ip"], "fe80::1");
+            }
+            assert!(store.list_peers().await.unwrap().is_empty());
+            assert!(store.list_peer_changes().await.unwrap().is_empty());
+            manager.sync_pending_peer_changes().await.unwrap();
+            assert!(!root.exists());
+        }
+        store.pool.close().await;
+    }
 
     #[test]
     fn update_endpoint_distinguishes_missing_null_and_value() {

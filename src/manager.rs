@@ -95,6 +95,15 @@ impl PeerManager {
             .await?
         };
 
+        if asn == self.local_asn {
+            tracing::info!(
+                event = "peer_test_completed",
+                peer_id = peer.peer_id,
+                "Peer test passed and the database reservation was rolled back"
+            );
+            return Ok(peer);
+        }
+
         if let Err(error) = self.apply_peer(&peer).await {
             self.compensate_failed_create(&peer).await;
             return Err(error);
@@ -431,7 +440,11 @@ impl PeerManager {
                 listen_port,
                 mtu,
             );
-            if self.db.reserve_peer(&peer).await? {
+            let test = asn == self.local_asn;
+            if test {
+                self.render_peer_config(&peer)?;
+            }
+            if self.db.reserve_peer(&peer, test).await? {
                 return Ok(peer);
             }
             if self.db.peer_exists(asn, &peer_name).await? {
@@ -575,6 +588,22 @@ impl PeerManager {
             .await
     }
 
+    fn render_peer_config(&self, peer: &Peer) -> Result<String, PeerError> {
+        PeerTemplate {
+            peer_id: peer.peer_id,
+            peer_name: &peer.peer_name,
+            asn: peer.asn,
+            local_asn: self.local_asn,
+            iface: &peer.iface_name,
+            local_ll_ip: peer.local_ll_ip,
+            remote_ll_ip: peer.remote_ll_ip,
+        }
+        .render()
+        .map_err(|error| PeerError::BirdReload {
+            stderr: format!("Failed to render the BIRD configuration: {error}"),
+        })
+    }
+
     async fn sync_bird_configs(&self) -> Result<(), PeerError> {
         let peers = self.db.list_peers().await?;
         self.sync_bird_configs_for(&peers, false).await
@@ -600,18 +629,7 @@ impl PeerManager {
                     ),
                 });
             }
-            let template = PeerTemplate {
-                peer_id: peer.peer_id,
-                peer_name: &peer.peer_name,
-                asn: peer.asn,
-                local_asn: self.local_asn,
-                iface: &peer.iface_name,
-                local_ll_ip: peer.local_ll_ip,
-                remote_ll_ip: peer.remote_ll_ip,
-            };
-            let content = template.render().map_err(|error| PeerError::BirdReload {
-                stderr: format!("Failed to render the BIRD configuration: {error}"),
-            })?;
+            let content = self.render_peer_config(peer)?;
             desired.insert(format!("{}.conf", peer.iface_name), content.into_bytes());
         }
 

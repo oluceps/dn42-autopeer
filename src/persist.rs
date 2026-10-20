@@ -287,8 +287,12 @@ impl PeerStore {
     }
 
     #[tracing::instrument(skip_all, fields(db_operation = "reserve_peer"))]
-    pub async fn reserve_peer(&self, peer: &Peer) -> Result<bool, PeerError> {
+    pub async fn reserve_peer(&self, peer: &Peer, test: bool) -> Result<bool, PeerError> {
         let mut connection = self.acquire().await?;
+        let mut transaction = sqlx::Connection::begin(&mut *connection)
+            .observed("db_begin")
+            .await
+            .map_err(|source| PeerError::Database { source })?;
         let result = sqlx::query(
             r#"
             INSERT INTO peers
@@ -307,10 +311,24 @@ impl PeerStore {
         .bind(peer.remote_ll_ip.to_string())
         .bind(peer.listen_port as i32)
         .bind(peer.mtu as i32)
-        .execute(&mut *connection)
+        .execute(&mut *transaction)
         .observed("db_query")
         .await
         .map_err(|source| PeerError::Database { source })?;
+        if test {
+            // Rollback also discards trigger events and PostgreSQL notifications.
+            transaction
+                .rollback()
+                .observed("db_rollback")
+                .await
+                .map_err(|source| PeerError::Database { source })?;
+        } else {
+            transaction
+                .commit()
+                .observed("db_commit")
+                .await
+                .map_err(|source| PeerError::Database { source })?;
+        }
         Ok(result.rows_affected() == 1)
     }
 
@@ -609,6 +627,73 @@ mod tests {
     use super::PeerStore;
     use sqlx::postgres::PgSslMode;
     use std::path::Path;
+
+    #[tokio::test]
+    #[ignore = "Requires an empty test PostgreSQL database in DATABASE_URL"]
+    async fn peer_reservation_rolls_back_rows_events_and_notifications() {
+        use crate::{
+            peer::{Peer, PeerStatus},
+            wg_pubkey::WgPubKey,
+        };
+        use sqlx::postgres::PgListener;
+        use std::time::Duration;
+
+        let store = PeerStore::new().await.unwrap();
+        assert!(store.list_peers().await.unwrap().is_empty());
+        assert!(store.list_peer_changes().await.unwrap().is_empty());
+        let mut listener = PgListener::connect_with(&store.pool).await.unwrap();
+        listener.listen("peer_changes").await.unwrap();
+        let peer = Peer {
+            peer_id: store.allocate_peer_id().await.unwrap(),
+            peer_name: "rollback-test".to_string(),
+            iface_name: "wgp-test".to_string(),
+            asn: 4242420291,
+            pubkey: WgPubKey::try_from("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string())
+                .unwrap(),
+            endpoint: None,
+            local_ll_ip: "fe80::1".parse().unwrap(),
+            remote_ll_ip: "fe80::2".parse().unwrap(),
+            status: PeerStatus::Provisioning,
+            listen_port: 20291,
+            mtu: 1420,
+        };
+
+        for _ in 0..2 {
+            assert!(store.reserve_peer(&peer, true).await.unwrap());
+            assert!(store.list_peers().await.unwrap().is_empty());
+            assert!(store.list_peer_changes().await.unwrap().is_empty());
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.recv())
+                .await
+                .is_err()
+        );
+
+        assert!(store.reserve_peer(&peer, false).await.unwrap());
+        tokio::time::timeout(Duration::from_secs(2), listener.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(store.peer_exists(peer.asn, &peer.peer_name).await.unwrap());
+        assert_eq!(store.list_peer_changes().await.unwrap().len(), 1);
+        assert!(!store.reserve_peer(&peer, true).await.unwrap());
+        assert!(!store.reserve_peer(&peer, false).await.unwrap());
+        let conflicting_port = Peer {
+            peer_id: store.allocate_peer_id().await.unwrap(),
+            peer_name: "port-conflict".to_string(),
+            ..peer.clone()
+        };
+        assert!(!store.reserve_peer(&conflicting_port, true).await.unwrap());
+        assert_eq!(store.list_peers().await.unwrap().len(), 1);
+        assert_eq!(store.list_peer_changes().await.unwrap().len(), 1);
+
+        store.delete_peer(peer.peer_id).await.unwrap();
+        for change in store.list_peer_changes().await.unwrap() {
+            store.delete_peer_change(change.event_id).await.unwrap();
+        }
+        drop(listener);
+        store.pool.close().await;
+    }
 
     #[test]
     fn socket_override_replaces_tcp_url_and_disables_ssl() {
