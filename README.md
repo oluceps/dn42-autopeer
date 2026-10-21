@@ -322,6 +322,7 @@ The service does not install kernel routes for these prefixes.
 
 | Variable | Description | Default |
 |---|---|---|
+| `LISTEN_ADDRESS` | HTTP listen address (IPv4 or IPv6) | `127.0.0.1` |
 | `PORT` | HTTP listen port | `8080` |
 | `DATABASE_URL` | PostgreSQL connection string | `postgres://dn42-bot@localhost/dn42` |
 | `DATABASE_SOCKET` | PostgreSQL Unix socket directory or `.s.PGSQL.*` path | Unset |
@@ -337,6 +338,11 @@ The service does not install kernel routes for these prefixes.
 | `REGISTRY_TIMEOUT_SECS` | Registry connect, read, and total timeout | `10` |
 | `REGISTRY_MAX_CONCURRENT` | Maximum concurrent registry checks | `16` |
 | `RUST_LOG` | JSON log filter | `warn,dn42_autopeer=info,sqlx=off,reqwest=off` |
+
+`LISTEN_ADDRESS` accepts an IPv4 or IPv6 address, without a port.
+Use `::1` for IPv6 loopback, without brackets.
+`PORT` sets the port for either address family.
+On NixOS, set `services.autopeer.listenAddress` and `services.autopeer.port`.
 
 Startup fails if either WireGuard key is absent or invalid.
 Startup also fails if the public key does not match the private key.

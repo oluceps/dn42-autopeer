@@ -3,7 +3,7 @@ use axum::{
     routing::{get, post},
 };
 use observability::{ObserveResult, log_failure};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -132,7 +132,11 @@ async fn main() {
         .unwrap_or_else(|_| "8080".to_string())
         .parse()
         .expect("PORT must be a valid u16 integer");
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listen_address: IpAddr = std::env::var("LISTEN_ADDRESS")
+        .unwrap_or_else(|_| "127.0.0.1".to_string())
+        .parse()
+        .expect("LISTEN_ADDRESS must be a valid IPv4 or IPv6 address");
+    let addr = SocketAddr::from((listen_address, port));
     let listener = TcpListener::bind(addr).await.unwrap();
     tracing::info!(event = "server_listening", address = %addr, local_asn, "Server listens for requests");
     axum::serve(listener, app)

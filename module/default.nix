@@ -19,6 +19,12 @@ in
       description = "The autopeer package to use.";
     };
 
+    listenAddress = mkOption {
+      type = types.str;
+      default = "127.0.0.1";
+      description = "The IPv4 or IPv6 address for the HTTP listener.";
+    };
+
     port = mkOption {
       type = types.port;
       default = 8080;
@@ -132,6 +138,7 @@ in
       path = [ pkgs.nftables ];
 
       environment = {
+        LISTEN_ADDRESS = cfg.listenAddress;
         PORT = toString cfg.port;
         BIRD_CONF_DIR = cfg.birdConfDir;
         LOCAL_ASN = toString cfg.localAsn;
